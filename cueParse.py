@@ -1,4 +1,5 @@
-import argparse, os, sys, pathlib, re
+import argparse, os, sys, pathlib, re, csv
+from pprint import pprint
 
 def parse_cue_file(file_path, debug):
     with open(file_path) as file:
@@ -8,13 +9,12 @@ def parse_cue_file(file_path, debug):
         current_track = None
         for line in lines:
             line = line.strip()
-            if(current_track is None):
-                print(line)
-                header_match = re.compile("REM (\S+) (.*$)").match(line)
+            if current_track is None:
+                header_match = re.compile('REM *(.*) (.*)').match(line)
                 cat_match = re.compile("CATALOG (.*$)").match(line)
                 title_match = re.compile("TITLE (.*$)").match(line)
                 perf_match = re.compile("PERFORMER (.*$)").match(line)
-                track_match = re.compile("\s+ TRACK (\d+) AUDIO").match(line)
+                track_match = re.compile(" *TRACK (\d+) AUDIO").match(line)
                 if header_match:
                     parsed["header"][header_match[1].lower()] = header_match[2]
                 elif cat_match:
@@ -25,15 +25,16 @@ def parse_cue_file(file_path, debug):
                     parsed["header"]["performer"] = perf_match[1]
                 elif track_match:
                     current_track = int(track_match[1])
+                    parsed[current_track] = {}
                 elif debug: 
                     print("skipping line: ", line)
             else:
-                title_match = re.compile("\s* TITLE (.*$)").match(line)
-                perf_match = re.compile("\s* PERFORMER (.*$)").match(line)
-                isrc_match = re.compile("\s* ISRC (.*$)").match(line)
-                pregap_match = re.compile("\s* ISRC (.*$)").match(line)
-                index_match = re.compile("\s* INDEX O1 (.*$)").match(line)
-                track_match = re.compile("\s* TRACK (\d+) AUDIO").match(line)
+                title_match = re.compile(" *TITLE (.*$)").match(line)
+                perf_match = re.compile(" *PERFORMER (.*$)").match(line)
+                isrc_match = re.compile(" *ISRC (.*$)").match(line)
+                pregap_match = re.compile(" *PREGAP (.*$)").match(line)
+                index_match = re.compile(" *INDEX 01 (.*$)").match(line)
+                track_match = re.compile(" *TRACK (\d+) AUDIO").match(line)
                 if title_match:
                     parsed[current_track]["title"] = title_match[1]
                 elif perf_match:
@@ -46,14 +47,57 @@ def parse_cue_file(file_path, debug):
                     parsed[current_track]["index"] = index_match[1]
                 elif track_match:
                     current_track = int(track_match[1])
+                    parsed[current_track] = {}
                 elif debug: 
                     print("skipping line: ", line)
     return parsed
+
+def write_headers_csv(parsed, headers_csv_file):
+    with open(headers_csv_file, 'w', newline='') as csvfile:
+        fieldnames = ['ix', 'title', 'performer', 'genre', 'catalog', 'cddbcat', 'comment', 'date', 'discid', 'volid']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for ix, p in enumerate(parsed):
+            writer.writerow({
+                'ix':       ix,
+                'title':    p['header'].get('title', '__NONE__'),
+                'performer':p['header'].get('performer', '__NONE__'),
+                'genre':    p['header'].get('genre', '__NONE__'),
+                'catalog':  p['header'].get('catalog', '__NONE__'),
+                'cddbcat':  p['header'].get('cddbcat', '__NONE__'),
+                'comment':  p['header'].get('comment', '__NONE__'),
+                'date':     p['header'].get('date', '__NONE__'),
+                'discid':   p['header'].get('discid', '__NONE__'),
+                'volid':    p['header'].get('volid', '__NONE__') })
+
+def write_tracks_csv(parsed, tracks_csv_file):
+    with open(tracks_csv_file, 'w', newline='') as csvfile:
+        fieldnames = ['header_ix', 'track_num', 'title', 'performer', 'isrc', 'pregap', 'index_time']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for header_ix, p in enumerate(parsed):
+            keys = list(p.keys())
+            keys.remove('header')
+            for track in sorted(keys):
+                if track == "header": 
+                    continue
+                writer.writerow({
+                    'header_ix':    header_ix,
+                    'track_num':    track,
+                    'title':    p[track].get('title', '__NONE__'),
+                    'performer':    p[track].get('performer', '__NONE__'),
+                    'isrc':    p[track].get('isrc', '__NONE__'),
+                    'pregap':    p[track].get('pregap', '__NONE__'),
+                    'index_time':    p[track].get('index', '__NONE__') })
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', '--recursive', dest='recursive', help="Recursively find .cue files from input path", action='store_true')
     parser.add_argument('-d', '--debug', dest='debug', help="Print debug output", action='store_true')
+    parser.add_argument('-H', '--headersfile', dest='headers_csv_file', help="Write headers CSV to specified file", required=False)
+    parser.add_argument('-T', '--tracksfile', dest='tracks_csv_file', help="Write tracks CSV to specified file", required=False)
+    parser.add_argument('-q', '--quiet', dest='quiet', help="Suppress printing parse results to terminal", action='store_true')
     parser.add_argument('path', help="Cue file, or folder containing (folders containing) cue files if --recursive specified")
     args = parser.parse_args()
 
@@ -66,10 +110,13 @@ if __name__ == '__main__':
         cue_files = [path for path in pathlib.Path(args.path).rglob('*.cue')]
     else:
         cue_files.append(args.path)
-    if args.debug:
-        print("*** Cue files: ", cue_files)
     parsed = [parse_cue_file(cue_file, args.debug) for cue_file in cue_files]
-    print("Parsed: ", parsed)
+    if args.headers_csv_file:
+        write_headers_csv(parsed, args.headers_csv_file)
+    if args.tracks_csv_file:
+        write_tracks_csv(parsed, args.tracks_csv_file)
+    if not args.quiet:
+        pprint(parsed)
 
         
 
