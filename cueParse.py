@@ -1,5 +1,21 @@
 import argparse, os, sys, pathlib, re, csv
 from pprint import pprint
+from rdflib import Graph, Literal, RDF, URIRef
+from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV
+
+# Music Ontology namespaces
+MO = Namespace("http://purl.org/ontology/mo/")
+TL = Namespace("http://purl.org/NET/c4dm/timeline.owl#")
+#MusicBrainz namespaces
+ARTIST = Namespace("https://musicbrainz.org/artist/")
+WORK = Namespace("https://musicbrainz.org/work/")
+RELEASE = Namespace("https://musicbrainz.org/work/")
+ISRC = Namespace("https://musicbrainz.org/isrc/")
+RECORDING = Namespace("https://musicbrainz.org/recording/")
+TRACK = Namespace("https://musicbrainz.org/track/")
+SSVRelease = Namespace("https://hypermusic.eu/data/ssv/release/")
+SSVTrack = Namespace("https://hypermusic.eu/data/ssv/track/")
+SSVO = Namespace("https://hypermusic.eu/ontology/ssv/")
 
 def parse_cue_file(file_path, debug):
     with open(file_path) as file:
@@ -52,6 +68,18 @@ def parse_cue_file(file_path, debug):
                     print("skipping line: ", line)
     return parsed
 
+def write_rdf(parsed, rdf_file):
+    g = Graph()
+    for ix, p in enumerate(parsed):
+        release = SSVRelease.ix
+        g.add((SSVRelease, RDF.type, MO.Release))
+        g.add((SSVRelease, DCTERMS.title, p['header'].get('title', '__NONE__')))
+        #g.add((SVGRelease, MO.catalogue_number, p['header'].get('cddbcat', '__NONE__'))
+        g.add((SVGRelease, MO.catalogue_number, p['header'].get('catalogue_number', '__NONE__'))
+            #... genre ...
+
+
+
 def write_headers_csv(parsed, headers_csv_file):
     with open(headers_csv_file, 'w', newline='') as csvfile:
         fieldnames = ['ix', 'title', 'performer', 'genre', 'catalog', 'cddbcat', 'comment', 'date', 'discid', 'volid']
@@ -90,6 +118,9 @@ def write_tracks_csv(parsed, tracks_csv_file):
                     'pregap':    p[track].get('pregap', '__NONE__'),
                     'index_time':    p[track].get('index', '__NONE__') })
 
+def write_rdf(parsed, rdf_file):
+    
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -97,6 +128,7 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--debug', dest='debug', help="Print debug output", action='store_true')
     parser.add_argument('-H', '--headersfile', dest='headers_csv_file', help="Write headers CSV to specified file", required=False)
     parser.add_argument('-T', '--tracksfile', dest='tracks_csv_file', help="Write tracks CSV to specified file", required=False)
+    parser.add_argument('-R', '--rdffile', dest='rdf_file', help='Write to RDF (TTL) file', required=False)
     parser.add_argument('-q', '--quiet', dest='quiet', help="Suppress printing parse results to terminal", action='store_true')
     parser.add_argument('path', help="Cue file, or folder containing (folders containing) cue files if --recursive specified")
     args = parser.parse_args()
@@ -117,7 +149,4 @@ if __name__ == '__main__':
         write_tracks_csv(parsed, args.tracks_csv_file)
     if not args.quiet:
         pprint(parsed)
-
-        
-
 
