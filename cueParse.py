@@ -1,7 +1,7 @@
 import argparse, os, sys, pathlib, re, csv
 from pprint import pprint
 from rdflib import Graph, Literal, RDF, URIRef
-from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV
+from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV, RDFS
 
 # Music Ontology namespaces
 MO = Namespace("http://purl.org/ontology/mo/")
@@ -14,7 +14,12 @@ ISRC = Namespace("https://musicbrainz.org/isrc/")
 RECORDING = Namespace("https://musicbrainz.org/recording/")
 TRACK = Namespace("https://musicbrainz.org/track/")
 SSVRelease = Namespace("https://hypermusic.eu/data/ssv/release/")
+SSVSignal = Namespace("https://hypermusic.eu/data/ssv/signal/")
+SSVRecord = Namespace("https://hypermusic.eu/data/ssv/record/")
 SSVTrack = Namespace("https://hypermusic.eu/data/ssv/track/")
+SSVWork = Namespace("https://hypermusic.eu/data/ssv/work/")
+SSVPerformance = Namespace("https://hypermusic.eu/data/ssv/performance/")
+SSVPerformer = Namespace("https://hypermusic.eu/data/ssv/performer/")
 SSVO = Namespace("https://hypermusic.eu/ontology/ssv/")
 
 def parse_cue_file(file_path, debug):
@@ -26,12 +31,20 @@ def parse_cue_file(file_path, debug):
         for line in lines:
             line = line.strip()
             if current_track is None:
+                print(line)
+                mbz_header_artist_match = re.compile ('REM MUSICBRAINZ_ALBUM_ARTIST_ID (.*)').match(line)
+                mbz_album_match = re.compile ('REM MUSICBRAINZ_ALBUM_ID (.*)').match(line)
                 header_match = re.compile('REM *(.*) (.*)').match(line)
                 cat_match = re.compile("CATALOG (.*$)").match(line)
                 title_match = re.compile("TITLE (.*$)").match(line)
                 perf_match = re.compile("PERFORMER (.*$)").match(line)
                 track_match = re.compile(" *TRACK (\d+) AUDIO").match(line)
-                if header_match:
+                if mbz_header_artist_match:
+                    # n.b. can be multiple IDs separated by semi-colons
+                    parsed["header"]["mbz_artist_list"] = mbz_header_artist_match[1].split(";")
+                elif mbz_album_match:
+                    parsed["header"]["mbz_album_id"] = mbz_album_match[1]
+                elif header_match:
                     parsed["header"][header_match[1].lower()] = header_match[2]
                 elif cat_match:
                     parsed["header"]["catalog"] = cat_match[1]
@@ -45,6 +58,8 @@ def parse_cue_file(file_path, debug):
                 elif debug: 
                     print("skipping line: ", line)
             else:
+                mbz_track_match = re.compile(" *REM MUSICBRAINZ_TRACK_ID (.*$)").match(line)
+                mbz_artist_match = re.compile(" *REM MUSICBRAINZ_ARTIST_ID (.*$)").match(line)
                 title_match = re.compile(" *TITLE (.*$)").match(line)
                 perf_match = re.compile(" *PERFORMER (.*$)").match(line)
                 isrc_match = re.compile(" *ISRC (.*$)").match(line)
@@ -53,6 +68,10 @@ def parse_cue_file(file_path, debug):
                 track_match = re.compile(" *TRACK (\d+) AUDIO").match(line)
                 if title_match:
                     parsed[current_track]["title"] = title_match[1]
+                elif mbz_track_match:
+                    parsed[current_track]["mbz_track"] = mbz_track_match[1]
+                elif mbz_artist_match:
+                    parsed[current_track]["mbz_artist"] = mbz_artist_match[1]
                 elif perf_match:
                     parsed[current_track]["performer"] = perf_match[1]
                 elif isrc_match:
@@ -71,14 +90,64 @@ def parse_cue_file(file_path, debug):
 def write_rdf(parsed, rdf_file):
     g = Graph()
     for ix, p in enumerate(parsed):
-        release = SSVRelease.ix
-        g.add((SSVRelease, RDF.type, MO.Release))
-        g.add((SSVRelease, DCTERMS.title, p['header'].get('title', '__NONE__')))
-        #g.add((SVGRelease, MO.catalogue_number, p['header'].get('cddbcat', '__NONE__'))
-        g.add((SVGRelease, MO.catalogue_number, p['header'].get('catalogue_number', '__NONE__'))
-            #... genre ...
+        release = URIRef(SSVRelease + str(ix))
+        record = URIRef(SSVRecord + str(ix))
+        #--------------RELEASE--------------#
+        g.add((release, RDF.type, MO.Release))
+        g.add((release, DCTERMS.title, Literal(p['header'].get('title', '__NONE__'))))
+        g.add((release, RDFS.label, Literal("Release: " + p['header'].get('title', '__NONE__'))))
+        #g.add((SSVRelease, MO.catalogue_number, p['header'].get('cddbcat', '__NONE__'))
+        g.add((release, MO.catalogue_number, Literal(p['header'].get('catalogue_number', '__NONE__'))))
+        g.add((release, MO.record, record))
+        #--------------RECORD--------------#
+        g.add((record, RDF.type, MO.Record))
+        g.add((release, RDFS.label, Literal("Record: " + p['header'].get('title', '__NONE__'))))
+        g.add((record, MO.track_count, Literal(len(p)-1)))
+        if 'musicbrainz_album_id' in p['header']:
+            g.add((record, MO.musicbrainz, RELEASE.p['header']['musicbrainz_album_id']))
+        for track_num in p:
+            if track_num == 'header':
+                continue
+            tix = str(ix) + '-' + str(track_num)
+            track = URIRef(SSVTrack + tix)
+            signal = URIRef(SSVSignal + tix)
+            performance = URIRef(SSVPerformance + tix)
+            performer = URIRef(SSVPerformer + tix)
+            work = URIRef(SSVWork+ tix)
 
-
+            g.add((record, MO.track, track))
+            g.add((release, MO.publication_of, signal))
+            #--------------SIGNAL--------------#
+            g.add((signal, RDF.type, MO.Signal))
+            g.add((signal, MO.published_as, track))
+            if 'isrc' in p[track_num]:
+                isrc = p[track_num]['isrc']
+                g.add((signal, MO.isrc, URIRef(ISRC + isrc)))
+            #--------------TRACK--------------#
+            g.add((track, RDF.type, MO.Track))
+            if 'mbz_track' in p[track_num]:
+                mbz_track_id = str(p[track_num]['mbz_track'])
+                g.add((track, MO.musicbrainz, URIRef(TRACK + mbz_track_id)))
+            g.add((track, MO.track_number, Literal(int(track_num))))
+            g.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
+            #--------------PERFORMANCE--------------#
+            g.add((performance, RDF.type, MO.Performance))
+            g.add((performance, MO.recorded_as, signal))
+            g.add((performance, MO.performance_of, work))
+            g.add((performance, RDFS.label, Literal("Performance: " + p[track_num]["title"])))
+            #--------------PERFORMER--------------#
+            g.add((performer, RDF.type, MO.MusicArtist))
+            g.add((performer, MO.performed, performance))
+            g.add((performer, FOAF.name, Literal(p[track_num]["performer"])))
+            g.add((performer, RDFS.label, Literal("Performer: " + p[track_num]["performer"])))
+            if 'mbz_artist' in p[track_num]:
+                mbz_artist_id = p[track_num]['mbz_artist']
+                g.add((performer, MO.musicbrainz, URIRef(ARTIST + mbz_artist_id)))
+            #--------------WORK--------------#
+            g.add((work, RDF.type, MO.MusicalWork))
+            g.add((work, DCTERMS.title, Literal(p[track_num]["title"])))
+            g.add((work, RDFS.label, Literal("Work: " + p[track_num]["title"])))
+    g.serialize(destination=rdf_file, format="text/turtle")
 
 def write_headers_csv(parsed, headers_csv_file):
     with open(headers_csv_file, 'w', newline='') as csvfile:
@@ -118,9 +187,6 @@ def write_tracks_csv(parsed, tracks_csv_file):
                     'pregap':    p[track].get('pregap', '__NONE__'),
                     'index_time':    p[track].get('index', '__NONE__') })
 
-def write_rdf(parsed, rdf_file):
-    
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -147,6 +213,8 @@ if __name__ == '__main__':
         write_headers_csv(parsed, args.headers_csv_file)
     if args.tracks_csv_file:
         write_tracks_csv(parsed, args.tracks_csv_file)
+    if args.rdf_file:
+        write_rdf(parsed, args.rdf_file)
     if not args.quiet:
         pprint(parsed)
 
