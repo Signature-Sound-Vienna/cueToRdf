@@ -2,6 +2,7 @@ import argparse, os, sys, pathlib, re, csv
 from pprint import pprint
 from rdflib import Graph, Literal, RDF, URIRef
 from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV, RDFS
+from urllib.parse import quote
 
 # Music Ontology namespaces
 MO = Namespace("http://purl.org/ontology/mo/")
@@ -13,19 +14,20 @@ RELEASE = Namespace("https://musicbrainz.org/work/")
 ISRC = Namespace("https://musicbrainz.org/isrc/")
 RECORDING = Namespace("https://musicbrainz.org/recording/")
 TRACK = Namespace("https://musicbrainz.org/track/")
-SSVRelease = Namespace("https://hypermusic.eu/data/ssv/release/")
-SSVSignal = Namespace("https://hypermusic.eu/data/ssv/signal/")
-SSVRecord = Namespace("https://hypermusic.eu/data/ssv/record/")
-SSVTrack = Namespace("https://hypermusic.eu/data/ssv/track/")
-SSVWork = Namespace("https://hypermusic.eu/data/ssv/work/")
-SSVPerformance = Namespace("https://hypermusic.eu/data/ssv/performance/")
-SSVPerformer = Namespace("https://hypermusic.eu/data/ssv/performer/")
-SSVO = Namespace("https://hypermusic.eu/ontology/ssv/")
+SSVRelease = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/release/")
+SSVSignal = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/signal/")
+SSVRecord = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/record/")
+SSVTrack = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/track/")
+SSVWork = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/work/")
+SSVPerformance = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/performance/")
+SSVPerformer = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/performer/")
+SSVO = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/ontology/ssv/")
 
 def parse_cue_file(file_path, debug):
     with open(file_path) as file:
         lines = file.readlines()
         parsed = {}
+        parsed["file_path"] = file_path
         parsed["header"] = {}
         current_track = None
         for line in lines:
@@ -89,7 +91,10 @@ def parse_cue_file(file_path, debug):
 
 def write_rdf(parsed, rdf_file):
     g = Graph()
-    for ix, p in enumerate(parsed):
+    for p in parsed:
+        ix = quote(p['file_path'].parent.as_posix())
+        print("_________________________________")
+        print(ix)
         release = URIRef(SSVRelease + str(ix))
         record = URIRef(SSVRecord + str(ix))
         #--------------RELEASE--------------#
@@ -106,7 +111,7 @@ def write_rdf(parsed, rdf_file):
         if 'musicbrainz_album_id' in p['header']:
             g.add((record, MO.musicbrainz, RELEASE.p['header']['musicbrainz_album_id']))
         for track_num in p:
-            if track_num == 'header':
+            if track_num == 'header' or track_num == 'file_path':
                 continue
             tix = str(ix) + '-' + str(track_num)
             track = URIRef(SSVTrack + tix)
