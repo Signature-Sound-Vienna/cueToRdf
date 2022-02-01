@@ -1,0 +1,23 @@
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX mo: <http://purl.org/ontology/mo/>
+
+select distinct ?performerMbz ?performerName  where { 
+	graph <TEST-DELETE> {
+    	?performer mo:performed ?performance ;
+                foaf:name ?performerName .
+    	?performance mo:recorded_as ?signal .
+        ?signal mo:published_as ?track .
+       	?track rdfs:label ?label .
+		?record mo:track ?track .
+        ?release mo:publication_of ?signal .
+    
+    	OPTIONAL {
+        	?track mo:musicbrainz ?TrackMbz .
+    	}
+        OPTIONAL { 
+        	?performer mo:musicbrainz ?performerMbz .
+  		}
+	}
+}
