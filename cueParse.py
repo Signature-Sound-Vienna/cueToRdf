@@ -89,12 +89,10 @@ def parse_cue_file(file_path, debug):
                     print("skipping line: ", line)
     return parsed
 
-def write_rdf(parsed, rdf_file):
+def write_rdf(parsed, rdf_file, path):
     g = Graph()
     for p in parsed:
-        ix = quote(p['file_path'].parent.as_posix())
-        print("_________________________________")
-        print(ix)
+        ix = quote(p['file_path'].parent.as_posix()).replace(path,'')
         release = URIRef(SSVRelease + str(ix))
         record = URIRef(SSVRecord + str(ix))
         #--------------RELEASE--------------#
@@ -146,8 +144,9 @@ def write_rdf(parsed, rdf_file):
             g.add((performer, FOAF.name, Literal(p[track_num]["performer"])))
             g.add((performer, RDFS.label, Literal("Performer: " + p[track_num]["performer"])))
             if 'mbz_artist' in p[track_num]:
-                mbz_artist_id = p[track_num]['mbz_artist']
-                g.add((performer, MO.musicbrainz, URIRef(ARTIST + mbz_artist_id)))
+                mbz_artist_ids = p[track_num]['mbz_artist'].split("; ") # in case of multiple artists
+                for mbz_artist_id in mbz_artist_ids:
+                    g.add((performer, MO.musicbrainz, URIRef(ARTIST + mbz_artist_id.replace('"', '') )))
             #--------------WORK--------------#
             g.add((work, RDF.type, MO.MusicalWork))
             g.add((work, DCTERMS.title, Literal(p[track_num]["title"])))
@@ -219,7 +218,7 @@ if __name__ == '__main__':
     if args.tracks_csv_file:
         write_tracks_csv(parsed, args.tracks_csv_file)
     if args.rdf_file:
-        write_rdf(parsed, args.rdf_file)
+        write_rdf(parsed, args.rdf_file, args.path)
     if not args.quiet:
         pprint(parsed)
 
