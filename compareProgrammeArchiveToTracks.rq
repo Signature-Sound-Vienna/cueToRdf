@@ -1,0 +1,49 @@
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>                                          
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>                            
+PREFIX dcterms: <http://purl.org/dc/terms/>                                     
+PREFIX mo: <http://purl.org/ontology/mo/>                                       
+PREFIX ny: <http://localhost:9999/vocab/> 
+                                                                                   
+SELECT distinct ?release ?year ?track ?trackNum ?title WHERE {                                        
+  GRAPH <repertoire_20220201> {                                                 
+      ?performer mo:performed ?performance ;                                       
+                foaf:name ?performerName .                                      
+      ?performance mo:recorded_as ?signal .                                     
+      ?signal mo:published_as ?track .                                          
+      ?track rdfs:label ?title ;
+         mo:track_number ?trackNum .                                            
+      ?record mo:track ?track .                                               
+      ?release mo:publication_of ?signal ; 
+          dcterms:title ?releaseTitle .                                       
+      OPTIONAL {                                                                
+          ?track mo:musicbrainz ?trackMbz .                                     
+      }                                                                         
+      OPTIONAL {                                                                
+          ?performer mo:musicbrainz ?performerMbz .                             
+      }                                                                         
+      FILTER(CONTAINS(STR(?release), "Neujahrskonzerte")).       
+      FILTER(REGEX(STR(?release), "\\d\\d\\d\\d$")).
+      BIND(STRAFTER(STR(?release), "https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/release/Neujahrskonzerte/") as ?year) .                                                     
+  }                                                                             
+}                                                                               
+ORDER BY ?release ?trackNum
+
+
+
+PREFIX dcterms: <http://purl.org/dc/terms/>                                     
+PREFIX mo: <http://purl.org/ontology/mo/>                                       
+PREFIX ny: <http://localhost:9999/vocab/> 
+
+SELECT distinct ?concert ?year ?conductor ?programmeItemNumber ?programmeItemTitle WHERE { 
+  graph <https://www.musikverein.at/konzertarchiv> { 
+    ?concert a mo:Performance ;                                                       
+      ny:Dirigent ?conductor ;                                                       
+      dcterms:date ?date .                                                          
+    ?programmeItem a ny:ProgrammeItem ;                                               
+      ny:programmeItemNumber ?programmeItemNumber ;                                                        
+      dcterms:isPartOf ?concert ;                                                     
+      dcterms:title ?programmeItemTitle .                                            
+      BIND(SUBSTR(?date, 0, 4) as ?year) .                                            
+      FILTER(SUBSTR(?date, 6) = "01-01") .               
+  }
+}      
