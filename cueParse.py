@@ -1,8 +1,10 @@
-import argparse, os, sys, pathlib, re, csv
+import argparse, os, sys, pathlib, re, csv, requests, warnings, time
 from pprint import pprint
 from rdflib import Graph, Literal, RDF, URIRef
 from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV, RDFS
 from urllib.parse import quote
+from fuzzywuzzy import fuzz
+
 
 # Music Ontology namespaces
 MO = Namespace("http://purl.org/ontology/mo/")
@@ -92,9 +94,25 @@ def parse_cue_file(file_path, debug):
 def write_rdf(parsed, rdf_file, path):
     g = Graph()
     for p in parsed:
-        ix = quote(p['file_path'].parent.as_posix()).replace(path,'')
-        release = URIRef(SSVRelease + str(ix))
-        record = URIRef(SSVRecord + str(ix))
+        # build a URI component to be used in the various URIs we generate for this release / record
+        ssvUriComponent = quote(p['file_path'].parent.as_posix()).replace(quote(path).rstrip("/"), "").lstrip("/")
+        release = URIRef(SSVRelease + str(ssvUriComponent))
+        record = URIRef(SSVRecord + str(ssvUriComponent))
+        mbz_album_json = None
+        if 'mbz_album_id' in p['header']:
+            # if we have musicbrainz identifiers, request them from mbz...
+            time.sleep(0.3) # be polite
+            try:
+                r = requests.get("https://musicbrainz.org/album/" + p['header']['mbz_album_id'], headers={"Accept": "application/ld+json"})
+                r.raise_for_status()
+                print("Response:")
+                pprint(r.text)
+                mbz_album_json = r.json()
+            except requests.exceptions.HTTPError as err:
+                warnings.warn("Could not GET Musicbrainz album "+ p['header']['mbz_album_id'] + ": " + err)
+        if mbz_album_json: 
+            pprint(mbz_album_json)
+
         #--------------RELEASE--------------#
         g.add((release, RDF.type, MO.Release))
         g.add((release, DCTERMS.title, Literal(p['header'].get('title', '__NONE__'))))
@@ -111,12 +129,11 @@ def write_rdf(parsed, rdf_file, path):
         for track_num in p:
             if track_num == 'header' or track_num == 'file_path':
                 continue
-            tix = str(ix) + '-' + str(track_num)
+            tix = str(ssvUriComponent) + '-' + str(track_num)
             track = URIRef(SSVTrack + tix)
             signal = URIRef(SSVSignal + tix)
             performance = URIRef(SSVPerformance + tix)
             performer = URIRef(SSVPerformer + tix)
-            work = URIRef(SSVWork+ tix)
 
             g.add((record, MO.track, track))
             g.add((release, MO.publication_of, signal))
@@ -133,10 +150,44 @@ def write_rdf(parsed, rdf_file, path):
                 g.add((track, MO.musicbrainz, URIRef(TRACK + mbz_track_id)))
             g.add((track, MO.track_number, Literal(int(track_num))))
             g.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
+            #--------------WORK----------------#
+            # We can only leap to an authoritative (MusicBrainz) work if:
+            # 1. We have a MBz album ID and have received data for it from the API
+            # 2. The corresponding track entry has a work associated with it on MBz
+            work = None
+            if mbz_album_json:
+                # First, locate the current track in the album data
+                mbz_tracks_json = mbz_album_json['track']
+                try: 
+                    # mbz has track numbers like 1.13 (13th track on disc 1)
+                    # filter out just the track num itself and compare it to our p track_num
+                    mbz_track_json = [t for t in mbz_tracks_json if t['trackNumber'][t['trackNumber'].index(".")+1:] == track_num]
+                except ValueError:
+                    sys.exit("Unexpected trackNumber format: {}".format(t['trackNumber']))
+                # if we have more than one match (e.g., because multiple discs) try to disambiguate with title similarity
+                if len(mbz_track_json) > 1:
+                    similarities = [fuzz.ratio(t['name'], p[track_num]['title']) for t in mbz_track_json]
+                    close_match_indices = [ix for ix, val in enumerate(similarities) if val > 90]
+                    mbz_track_json = [mbz_track_json[i] for i in close_match_indices]
+                # if we still have more than one match, warn the user (and default to first close-similarity match)
+                if len(mbz_track_json) > 1:
+                    warnings.warn("Multiple matches on track disambiguation, please sort manually: {} ##### {}".format(mbz_track_json, p[track_num]))
+                if len(mbz_track_json) == 0:
+                    warnings.warn("Can't find unique matching cue track name {cueName}".format(cueName=p[track_num]["title"]))
+                else: 
+                    if 'recordingOf' in mbz_track_json[0]:
+                        work = URIRef(mbz_track_json[0]['recordingOf']['@id'])
+                        g.add((work, RDF.type, MO.MusicalWork))
+                        g.add((work, DCTERMS.title, Literal(mbz_track_json[0]['recordingOf']['name'])))
+                        g.add((work, RDFS.label, Literal("Work: " + mbz_track_json[0]['recordingOf']['name'])))
+                    else:
+                        warnings.warn("No work associated with MBz track: {}".format(mbz_track_json[0]["@id"]))
+
             #--------------PERFORMANCE--------------#
             g.add((performance, RDF.type, MO.Performance))
             g.add((performance, MO.recorded_as, signal))
-            g.add((performance, MO.performance_of, work))
+            if work:
+                g.add((performance, MO.performance_of, work))
             g.add((performance, RDFS.label, Literal("Performance: " + p[track_num]["title"])))
             #--------------PERFORMER--------------#
             g.add((performer, RDF.type, MO.MusicArtist))
@@ -147,10 +198,6 @@ def write_rdf(parsed, rdf_file, path):
                 mbz_artist_ids = p[track_num]['mbz_artist'].split("; ") # in case of multiple artists
                 for mbz_artist_id in mbz_artist_ids:
                     g.add((performer, MO.musicbrainz, URIRef(ARTIST + mbz_artist_id.replace('"', '') )))
-            #--------------WORK--------------#
-            g.add((work, RDF.type, MO.MusicalWork))
-            g.add((work, DCTERMS.title, Literal(p[track_num]["title"])))
-            g.add((work, RDFS.label, Literal("Work: " + p[track_num]["title"])))
     g.serialize(destination=rdf_file, format="text/turtle")
 
 def write_headers_csv(parsed, headers_csv_file):
@@ -199,6 +246,7 @@ if __name__ == '__main__':
     parser.add_argument('-H', '--headersfile', dest='headers_csv_file', help="Write headers CSV to specified file", required=False)
     parser.add_argument('-T', '--tracksfile', dest='tracks_csv_file', help="Write tracks CSV to specified file", required=False)
     parser.add_argument('-R', '--rdffile', dest='rdf_file', help='Write to RDF (TTL) file', required=False)
+    parser.add_argument('-m', '--mediaroot', dest="media_root_path", help='Media root path, to be overridden in URI generation', required=False)
     parser.add_argument('-q', '--quiet', dest='quiet', help="Suppress printing parse results to terminal", action='store_true')
     parser.add_argument('path', help="Cue file, or folder containing (folders containing) cue files if --recursive specified")
     args = parser.parse_args()
@@ -218,7 +266,13 @@ if __name__ == '__main__':
     if args.tracks_csv_file:
         write_tracks_csv(parsed, args.tracks_csv_file)
     if args.rdf_file:
-        write_rdf(parsed, args.rdf_file, args.path)
+        if args.recursive:
+            media_root_path = args.path
+        if args.media_root_path:
+            media_root_path = args.media_root_path 
+        if not media_root_path:
+            sys.exit("Please specify at least one of --recursive or --mediaroot <media_root_path> when writing to RDF")
+        write_rdf(parsed, args.rdf_file, media_root_path)
     if not args.quiet:
         pprint(parsed)
 
