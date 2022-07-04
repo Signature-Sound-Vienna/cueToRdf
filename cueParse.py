@@ -16,13 +16,12 @@ RELEASE = Namespace("https://musicbrainz.org/work/")
 ISRC = Namespace("https://musicbrainz.org/isrc/")
 RECORDING = Namespace("https://musicbrainz.org/recording/")
 TRACK = Namespace("https://musicbrainz.org/track/")
-SSVRelease = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/release/")
-SSVSignal = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/signal/")
-SSVRecord = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/record/")
-SSVTrack = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/track/")
-SSVWork = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/work/")
-SSVPerformance = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/performance/")
-SSVPerformer = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/ssv/performer/")
+SSVRelease = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/release/")
+SSVSignal = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/signal/")
+SSVRecord = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/record/")
+SSVTrack = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/track/")
+SSVPerformance = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/performance/")
+SSVPerformer = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/performer/")
 SSVO = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/ontology/ssv/")
 
 def parse_cue_file(file_path, debug):
@@ -161,7 +160,8 @@ def write_rdf(parsed, rdf_file, path):
                 try: 
                     # mbz has track numbers like 1.13 (13th track on disc 1)
                     # filter out just the track num itself and compare it to our p track_num
-                    mbz_track_json = [t for t in mbz_tracks_json if t['trackNumber'][t['trackNumber'].index(".")+1:] == track_num]
+                    print("Looking for track num: ", str(track_num))
+                    mbz_track_json = [t for t in mbz_tracks_json if t['trackNumber'][t['trackNumber'].index(".")+1:] == str(track_num)]
                 except ValueError:
                     sys.exit("Unexpected trackNumber format: {}".format(t['trackNumber']))
                 # if we have more than one match (e.g., because multiple discs) try to disambiguate with title similarity
