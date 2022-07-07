@@ -1,7 +1,7 @@
 import argparse, os, sys, pathlib, re, csv, requests, warnings, time
 from pprint import pprint
-from rdflib import Graph, Literal, RDF, URIRef
-from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV, RDFS
+from rdflib import Graph, Literal, RDF, URIRef, BNode
+from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV, RDFS, XSD
 from urllib.parse import quote
 from fuzzywuzzy import fuzz
 
@@ -9,6 +9,7 @@ from fuzzywuzzy import fuzz
 # Music Ontology namespaces
 MO = Namespace("http://purl.org/ontology/mo/")
 TL = Namespace("http://purl.org/NET/c4dm/timeline.owl#")
+EV = Namespace("https://purl.org/NET/c4dm/event.owl#")
 #MusicBrainz namespaces
 ARTIST = Namespace("https://musicbrainz.org/artist/")
 WORK = Namespace("https://musicbrainz.org/work/")
@@ -16,12 +17,13 @@ RELEASE = Namespace("https://musicbrainz.org/work/")
 ISRC = Namespace("https://musicbrainz.org/isrc/")
 RECORDING = Namespace("https://musicbrainz.org/recording/")
 TRACK = Namespace("https://musicbrainz.org/track/")
-SSVRelease = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/release/")
-SSVSignal = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/signal/")
-SSVRecord = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/record/")
-SSVTrack = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/track/")
-SSVPerformance = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/performance/")
-SSVPerformer = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/data/performer/")
+SSVRelease = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/release/")
+SSVReleaseEvent = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/release-event/")
+SSVSignal = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/signal/")
+SSVRecord = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/record/")
+SSVTrack = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/track/")
+SSVPerformance = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/performance/")
+SSVPerformer = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/performer/")
 SSVO = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/ontology/ssv/")
 
 def parse_cue_file(file_path, debug):
@@ -96,6 +98,7 @@ def write_rdf(parsed, rdf_file, path):
         # build a URI component to be used in the various URIs we generate for this release / record
         ssvUriComponent = quote(p['file_path'].parent.as_posix()).replace(quote(path).rstrip("/"), "").lstrip("/")
         release = URIRef(SSVRelease + str(ssvUriComponent))
+        release_event = URIRef(SSVReleaseEvent + str(ssvUriComponent))
         record = URIRef(SSVRecord + str(ssvUriComponent))
         mbz_album_json = None
         if 'mbz_album_id' in p['header']:
@@ -119,6 +122,16 @@ def write_rdf(parsed, rdf_file, path):
         #g.add((SSVRelease, MO.catalogue_number, p['header'].get('cddbcat', '__NONE__'))
         g.add((release, MO.catalogue_number, Literal(p['header'].get('catalogue_number', '__NONE__'))))
         g.add((release, MO.record, record))
+        
+        #-----------RELEASE EVENT----------#
+        g.add((release_event, RDF.type, MO.ReleaseEvent))
+        g.add((release_event, RDF.type, EV.Event))
+        g.add((release_event, MO.release, release))
+        release_event_time = BNode()
+        g.add((release_event, EV.time, release_event_time))
+        g.add((release_event_time, RDF.type, TL.Instant))
+        g.add((release_event_time, TL.atYear, Literal(p['header'].get('date', '__NONE__'), datatype=XSD.gYear)))
+
         #--------------RECORD--------------#
         g.add((record, RDF.type, MO.Record))
         g.add((release, RDFS.label, Literal("Record: " + p['header'].get('title', '__NONE__'))))
@@ -176,12 +189,19 @@ def write_rdf(parsed, rdf_file, path):
                     warnings.warn("Can't find unique matching cue track name {cueName}".format(cueName=p[track_num]["title"]))
                 else: 
                     if 'recordingOf' in mbz_track_json[0]:
-                        work = URIRef(mbz_track_json[0]['recordingOf']['@id'])
-                        g.add((work, RDF.type, MO.MusicalWork))
-                        g.add((work, DCTERMS.title, Literal(mbz_track_json[0]['recordingOf']['name'])))
-                        g.add((work, RDFS.label, Literal("Work: " + mbz_track_json[0]['recordingOf']['name'])))
-                    else:
-                        warnings.warn("No work associated with MBz track: {}".format(mbz_track_json[0]["@id"]))
+                        rec = mbz_track_json[0]['recordingOf']
+                        if isinstance(rec, list):
+                            # associated with multiple works - suspicious...
+                            warnings.warn("Track associated with multiple works: " + mbz_track_json[0]["@id"])
+                        else:
+                            rec = [rec]
+                        for r in rec:
+                            work = URIRef(r['@id'])
+                            g.add((work, RDF.type, MO.MusicalWork))
+                            g.add((work, DCTERMS.title, Literal(r['name'])))
+                            g.add((work, RDFS.label, Literal("Work: " + r['name'])))
+                        else:
+                            warnings.warn("No work associated with MBz track: {}".format(r["@id"]))
 
             #--------------PERFORMANCE--------------#
             g.add((performance, RDF.type, MO.Performance))
