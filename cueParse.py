@@ -200,8 +200,8 @@ def write_rdf(parsed, rdf_file, path):
                             g.add((work, RDF.type, MO.MusicalWork))
                             g.add((work, DCTERMS.title, Literal(r['name'])))
                             g.add((work, RDFS.label, Literal("Work: " + r['name'])))
-                        else:
-                            warnings.warn("No work associated with MBz track: {}".format(r["@id"]))
+                    else:
+                        warnings.warn("No work associated with MBz track: {}".format(mbz_track_json[0]["@id"]))
 
             #--------------PERFORMANCE--------------#
             g.add((performance, RDF.type, MO.Performance))
