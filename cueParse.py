@@ -17,14 +17,14 @@ RELEASE = Namespace("https://musicbrainz.org/work/")
 ISRC = Namespace("https://musicbrainz.org/isrc/")
 RECORDING = Namespace("https://musicbrainz.org/recording/")
 TRACK = Namespace("https://musicbrainz.org/track/")
-SSVRelease = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/release/")
-SSVReleaseEvent = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/release-event/")
-SSVSignal = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/signal/")
-SSVRecord = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/record/")
-SSVTrack = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/track/")
-SSVPerformance = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/performance/")
-SSVPerformer = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/rdf/performer/")
-SSVO = Namespace("https://repo.mdw.ac.at/signature-sound-vienna/ontology/ssv/")
+SSVRelease = Namespace("https://w3id.org/ssv/data/0.9/release/")
+SSVReleaseEvent = Namespace("https://w3id.org/ssv/data/0.9/release_event/")
+SSVSignal = Namespace("https://w3id.org/ssv/data/0.9/signal/")
+SSVRecord = Namespace("https://w3id.org/ssv/data/0.9/record/")
+SSVTrack = Namespace("https://w3id.org/ssv/data/0.9/track/")
+SSVPerformance = Namespace("https://w3id.org/ssv/data/0.9/performance/")
+SSVPerformer = Namespace("https://w3id.org/ssv/data/0.9/performer/")
+SSVO = Namespace("https://w3id.org/ssv/data/0.9/vocab/")
 
 def parse_cue_file(file_path, debug):
     with open(file_path) as file:
@@ -70,6 +70,7 @@ def parse_cue_file(file_path, debug):
                 isrc_match = re.compile(" *ISRC (.*$)").match(line)
                 pregap_match = re.compile(" *PREGAP (.*$)").match(line)
                 index_match = re.compile(" *INDEX 01 (.*$)").match(line)
+                file_match = re.compile("FILE (.*)( WAVE)?$").match(line)
                 track_match = re.compile(" *TRACK (\d+) AUDIO").match(line)
                 if title_match:
                     parsed[current_track]["title"] = title_match[1]
@@ -88,12 +89,15 @@ def parse_cue_file(file_path, debug):
                 elif track_match:
                     current_track = int(track_match[1])
                     parsed[current_track] = {}
+                elif file_match:
+                    parsed[current_track]["file"] = file_match[1]
                 elif debug: 
                     print("skipping line: ", line)
     return parsed
 
-def write_rdf(parsed, rdf_file, path):
-    g = Graph()
+def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
+    g = Graph() # the full graph
+    private = Graph() # for private audio file to track URI information
     for p in parsed:
         # build a URI component to be used in the various URIs we generate for this release / record
         ssvUriComponent = quote(p['file_path'].parent.as_posix()).replace(quote(path).rstrip("/"), "").lstrip("/")
@@ -116,53 +120,67 @@ def write_rdf(parsed, rdf_file, path):
             pprint(mbz_album_json)
 
         #--------------RELEASE--------------#
-        g.add((release, RDF.type, MO.Release))
-        g.add((release, DCTERMS.title, Literal(p['header'].get('title', '__NONE__'))))
-        g.add((release, RDFS.label, Literal("Release: " + p['header'].get('title', '__NONE__'))))
-        #g.add((SSVRelease, MO.catalogue_number, p['header'].get('cddbcat', '__NONE__'))
-        g.add((release, MO.catalogue_number, Literal(p['header'].get('catalogue_number', '__NONE__'))))
-        g.add((release, MO.record, record))
+        releaseGraph = Graph()
+        releaseGraph.add((release, RDF.type, MO.Release))
+        releaseGraph.add((release, DCTERMS.title, Literal(p['header'].get('title', '__NONE__'))))
+        releaseGraph.add((release, RDFS.label, Literal("Release: " + p['header'].get('title', '__NONE__'))))
+        #releaseGraph.add((SSVRelease, MO.catalogue_number, p['header'].get('cddbcat', '__NONE__'))
+        releaseGraph.add((release, MO.catalogue_number, Literal(p['header'].get('catalogue_number', '__NONE__'))))
+        releaseGraph.add((release, MO.record, record))
+        # add release graph to the main graph
+        g += releaseGraph
         
         #-----------RELEASE EVENT----------#
-        g.add((release_event, RDF.type, MO.ReleaseEvent))
-        g.add((release_event, RDF.type, EV.Event))
-        g.add((release_event, MO.release, release))
+        releaseEventGraph = Graph()
+        releaseEventGraph.add((release_event, RDF.type, MO.ReleaseEvent))
+        releaseEventGraph.add((release_event, RDF.type, EV.Event))
+        releaseEventGraph.add((release_event, MO.release, release))
         release_event_time = BNode()
-        g.add((release_event, EV.time, release_event_time))
-        g.add((release_event_time, RDF.type, TL.Instant))
-        g.add((release_event_time, TL.atYear, Literal(p['header'].get('date', '__NONE__'), datatype=XSD.gYear)))
+        releaseEventGraph.add((release_event, EV.time, release_event_time))
+        releaseEventGraph.add((release_event_time, RDF.type, TL.Instant))
+        releaseEventGraph.add((release_event_time, TL.atYear, Literal(p['header'].get('date', '__NONE__'), datatype=XSD.gYear)))
+        # add release graph to the main graph
+        g += releaseEventGraph
 
-        #--------------RECORD--------------#
-        g.add((record, RDF.type, MO.Record))
-        g.add((release, RDFS.label, Literal("Record: " + p['header'].get('title', '__NONE__'))))
-        g.add((record, MO.track_count, Literal(len(p)-1)))
+        #--------------RECORD, TRACK, SIGNAL--------------#
+        recordGraph = Graph()
+        trackGraph = Graph()
+        signalGraph = Graph()
+        recordGraph.add((record, RDF.type, MO.Record))
+        releaseGraph.add((release, RDFS.label, Literal("Record: " + p['header'].get('title', '__NONE__'))))
+        recordGraph.add((record, MO.track_count, Literal(len(p)-1)))
         if 'musicbrainz_album_id' in p['header']:
-            g.add((record, MO.musicbrainz, RELEASE.p['header']['musicbrainz_album_id']))
+            recordGraph.add((record, MO.musicbrainz, RELEASE.p['header']['musicbrainz_album_id']))
         for track_num in p:
             if track_num == 'header' or track_num == 'file_path':
                 continue
-            tix = str(ssvUriComponent) + '-' + str(track_num)
+            tix = str(ssvUriComponent) + '#' + str(track_num)
             track = URIRef(SSVTrack + tix)
             signal = URIRef(SSVSignal + tix)
             performance = URIRef(SSVPerformance + tix)
             performer = URIRef(SSVPerformer + tix)
 
-            g.add((record, MO.track, track))
-            g.add((release, MO.publication_of, signal))
+            recordGraph.add((record, MO.track, track))
+            releaseGraph.add((release, MO.publication_of, signal))
             #--------------SIGNAL--------------#
-            g.add((signal, RDF.type, MO.Signal))
-            g.add((signal, MO.published_as, track))
+            signalGraph.add((signal, RDF.type, MO.Signal))
+            signalGraph.add((signal, MO.published_as, track))
             if 'isrc' in p[track_num]:
                 isrc = p[track_num]['isrc']
-                g.add((signal, MO.isrc, URIRef(ISRC + isrc)))
+                signalGraph.add((signal, MO.isrc, URIRef(ISRC + isrc)))
             #--------------TRACK--------------#
-            g.add((track, RDF.type, MO.Track))
+            trackGraph.add((track, RDF.type, MO.Track))
+            private.add((track, RDF.type, MO.Track))
             if 'mbz_track' in p[track_num]:
                 mbz_track_id = str(p[track_num]['mbz_track'])
-                g.add((track, MO.musicbrainz, URIRef(TRACK + mbz_track_id)))
-            g.add((track, MO.track_number, Literal(int(track_num))))
-            g.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
-            #--------------WORK----------------#
+                trackGraph.add((track, MO.musicbrainz, URIRef(TRACK + mbz_track_id)))
+                private.add((track, MO.musicbrainz, URIRef(TRACK + mbz_track_id)))
+            trackGraph.add((track, MO.track_number, Literal(int(track_num))))
+            private.add((track, MO.track_number, Literal(int(track_num))))
+            trackGraph.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
+            private.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
+            private.add((track, SSVO.localPath, Literal(p[track_num].get("file", "__NONE__"))))
+            #--------------WORK----------------
             # We can only leap to an authoritative (MusicBrainz) work if:
             # 1. We have a MBz album ID and have received data for it from the API
             # 2. The corresponding track entry has a work associated with it on MBz
@@ -197,6 +215,7 @@ def write_rdf(parsed, rdf_file, path):
                             rec = [rec]
                         for r in rec:
                             work = URIRef(r['@id'])
+                            # add these straight to the full graph, we don't need to republish mbz individually
                             g.add((work, RDF.type, MO.MusicalWork))
                             g.add((work, DCTERMS.title, Literal(r['name'])))
                             g.add((work, RDFS.label, Literal("Work: " + r['name'])))
@@ -204,21 +223,53 @@ def write_rdf(parsed, rdf_file, path):
                         warnings.warn("No work associated with MBz track: {}".format(mbz_track_json[0]["@id"]))
 
             #--------------PERFORMANCE--------------#
-            g.add((performance, RDF.type, MO.Performance))
-            g.add((performance, MO.recorded_as, signal))
+            performanceGraph = Graph()
+            performanceGraph.add((performance, RDF.type, MO.Performance))
+            performanceGraph.add((performance, MO.recorded_as, signal))
             if work:
-                g.add((performance, MO.performance_of, work))
-            g.add((performance, RDFS.label, Literal("Performance: " + p[track_num]["title"])))
+                performanceGraph.add((performance, MO.performance_of, work))
+            performanceGraph.add((performance, RDFS.label, Literal("Performance: " + p[track_num]["title"])))
             #--------------PERFORMER--------------#
-            g.add((performer, RDF.type, MO.MusicArtist))
-            g.add((performer, MO.performed, performance))
-            g.add((performer, FOAF.name, Literal(p[track_num]["performer"])))
-            g.add((performer, RDFS.label, Literal("Performer: " + p[track_num]["performer"])))
+            performerGraph = Graph()
+            performerGraph.add((performer, RDF.type, MO.MusicArtist))
+            performerGraph.add((performer, MO.performed, performance))
+            performerGraph.add((performer, FOAF.name, Literal(p[track_num]["performer"])))
+            performerGraph.add((performer, RDFS.label, Literal("Performer: " + p[track_num]["performer"])))
             if 'mbz_artist' in p[track_num]:
                 mbz_artist_ids = p[track_num]['mbz_artist'].split("; ") # in case of multiple artists
                 for mbz_artist_id in mbz_artist_ids:
-                    g.add((performer, MO.musicbrainz, URIRef(ARTIST + mbz_artist_id.replace('"', '') )))
-    g.serialize(destination=rdf_file, format="text/turtle")
+                    performerGraph.add((performer, MO.musicbrainz, URIRef(ARTIST + mbz_artist_id.replace('"', '') )))
+            # serialize each local graph and add to the main graph
+            if(rdf_dir_path):
+                # ensure the subdirectories exist
+                for subdir in ["release", "release_event", "record", "track", "signal", "performance", "performer"]:
+                    subdir_path = os.path.join(rdf_dir_path, subdir)
+                    if not os.path.exists(subdir_path):
+                        os.makedirs(subdir_path)
+                    # for each subdir, serialize the corresponding graph
+                    local_graph_name = subdir + "Graph"
+                    local_graph = locals().get(local_graph_name)
+                    if local_graph:
+                        serializeRdf(local_graph, os.path.join(subdir_path, str(ssvUriComponent)))
+            # add each local graph to the main graph
+            g += releaseGraph
+            g += releaseEventGraph
+            g += recordGraph
+            g += trackGraph
+            g += signalGraph
+            g += performanceGraph
+            g += performerGraph
+    serializeRdf(g, rdf_file)
+    if private:
+        serializeRdf(private, private_rdf_file)
+
+def serializeRdf(g, path):
+    # serialize the graph to a file in each of the formats
+    g.serialize(destination=path+'.ttl', format="text/turtle")
+    g.serialize(destination=path+'.rdf', format="application/rdf+xml")
+    g.serialize(destination=path+'.jsonld', format="json-ld")
+    g.serialize(destination=path+'.n3', format="n3")
+    g.serialize(destination=path+'.nt', format="nt")
 
 def write_headers_csv(parsed, headers_csv_file):
     with open(headers_csv_file, 'w', newline='') as csvfile:
@@ -266,6 +317,8 @@ if __name__ == '__main__':
     parser.add_argument('-H', '--headersfile', dest='headers_csv_file', help="Write headers CSV to specified file", required=False)
     parser.add_argument('-T', '--tracksfile', dest='tracks_csv_file', help="Write tracks CSV to specified file", required=False)
     parser.add_argument('-R', '--rdffile', dest='rdf_file', help='Write to RDF (TTL) file', required=False)
+    parser.add_argument('-D', '--rdfdirectory', dest='rdf_directory', help='Write RDF (TTL) files to specified directory', required=False)
+    parser.add_argument('-A', '--audioFilenameRdf', dest='audio_filename_rdf', help='Write private audio file to track URI information to RDF (TTL) file', required=False)
     parser.add_argument('-m', '--mediaroot', dest="media_root_path", help='Media root path, to be overridden in URI generation', required=False)
     parser.add_argument('-q', '--quiet', dest='quiet', help="Suppress printing parse results to terminal", action='store_true')
     parser.add_argument('path', help="Cue file, or folder containing (folders containing) cue files if --recursive specified")
@@ -286,13 +339,19 @@ if __name__ == '__main__':
     if args.tracks_csv_file:
         write_tracks_csv(parsed, args.tracks_csv_file)
     if args.rdf_file:
+        rdf_dir_path = False
+        if args.rdf_directory:
+            rdf_dir_path = args.rdf_directory
+        audio_filename_rdf = False
         if args.recursive:
             media_root_path = args.path
         if args.media_root_path:
             media_root_path = args.media_root_path 
         if not media_root_path:
             sys.exit("Please specify at least one of --recursive or --mediaroot <media_root_path> when writing to RDF")
-        write_rdf(parsed, args.rdf_file, media_root_path)
-    if not args.quiet:
+        if args.audio_filename_rdf:
+            audio_filename_rdf = args.audio_filename_rdf
+        write_rdf(parsed, args.rdf_file, rdf_dir_path, media_root_path, audio_filename_rdf)
+    if not args.quiet: 
         pprint(parsed)
 
