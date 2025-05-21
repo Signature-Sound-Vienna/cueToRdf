@@ -1,9 +1,11 @@
-import argparse, os, sys, pathlib, re, csv, requests, warnings, time
+import argparse, os, sys, pathlib, re, csv, requests, warnings, time, json
 from pprint import pprint
 from rdflib import Graph, Literal, RDF, URIRef, BNode
 from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV, RDFS, XSD
 from urllib.parse import quote
 from fuzzywuzzy import fuzz
+import librosa
+import numpy as np
 
 
 # Music Ontology namespaces
@@ -17,14 +19,43 @@ RELEASE = Namespace("https://musicbrainz.org/work/")
 ISRC = Namespace("https://musicbrainz.org/isrc/")
 RECORDING = Namespace("https://musicbrainz.org/recording/")
 TRACK = Namespace("https://musicbrainz.org/track/")
-SSVRelease = Namespace("https://w3id.org/ssv/data/0.9/release/")
-SSVReleaseEvent = Namespace("https://w3id.org/ssv/data/0.9/release_event/")
-SSVSignal = Namespace("https://w3id.org/ssv/data/0.9/signal/")
-SSVRecord = Namespace("https://w3id.org/ssv/data/0.9/record/")
-SSVTrack = Namespace("https://w3id.org/ssv/data/0.9/track/")
-SSVPerformance = Namespace("https://w3id.org/ssv/data/0.9/performance/")
-SSVPerformer = Namespace("https://w3id.org/ssv/data/0.9/performer/")
-SSVO = Namespace("https://w3id.org/ssv/data/0.9/vocab/")
+SSVRelease = Namespace("https://w3id.org/ssv/0.9/data/release/")
+SSVReleaseEvent = Namespace("https://w3id.org/ssv/0.9/data/release_event/")
+SSVSignal = Namespace("https://w3id.org/ssv/0.9/data/signal/")
+SSVRecord = Namespace("https://w3id.org/ssv/0.9/data/record/")
+SSVTrack = Namespace("https://w3id.org/ssv/0.9/data/track/")
+SSVPerformance = Namespace("https://w3id.org/ssv/0.9/data/performance/")
+SSVPerformer = Namespace("https://w3id.org/ssv/0.9/data/performer/")
+SSVPeaks = Namespace("https://w3id.org/ssv/0.9/data/peaks/")
+SSVO = Namespace("https://w3id.org/ssv/0.9/data/vocab#")
+
+def compute_peaks(audio_path, output_path='peaks.json', segment_size=1024):
+    try:
+        y, sr = librosa.load(audio_path, sr=None)
+    except Exception as e:
+        print(f"Error loading audio file: {e}")
+        sys.exit(1)
+
+    abs_y = np.abs(y)
+    peaks = [np.max(abs_y[i:i+segment_size]) for i in range(0, len(abs_y), segment_size)]
+    
+    peaks = np.array(peaks)
+    if peaks.max() > peaks.min():  # Avoid division by zero
+        peaks = (peaks - peaks.min()) / (peaks.max() - peaks.min())
+    else:
+        peaks = np.zeros_like(peaks)
+
+    # ensure output_path directory exists
+    output_dir = os.path.dirname(output_path)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    try:
+        with open(output_path, 'w') as f:
+            json.dump(peaks.tolist(), f)
+        print(f"Peaks saved to {output_path}")
+    except Exception as e:
+        print(f"Error writing to JSON file: {e}")
+        sys.exit(1)
 
 def parse_cue_file(file_path, debug):
     with open(file_path) as file:
@@ -43,7 +74,7 @@ def parse_cue_file(file_path, debug):
                 cat_match = re.compile("CATALOG (.*$)").match(line)
                 title_match = re.compile("TITLE (.*$)").match(line)
                 perf_match = re.compile("PERFORMER (.*$)").match(line)
-                track_match = re.compile(" *TRACK (\d+) AUDIO").match(line)
+                track_match = re.compile(" *TRACK (\\d+) AUDIO").match(line)
                 if mbz_header_artist_match:
                     # n.b. can be multiple IDs separated by semi-colons
                     parsed["header"]["mbz_artist_list"] = mbz_header_artist_match[1].split(";")
@@ -70,8 +101,8 @@ def parse_cue_file(file_path, debug):
                 isrc_match = re.compile(" *ISRC (.*$)").match(line)
                 pregap_match = re.compile(" *PREGAP (.*$)").match(line)
                 index_match = re.compile(" *INDEX 01 (.*$)").match(line)
-                file_match = re.compile("FILE (.*)( WAVE)?$").match(line)
-                track_match = re.compile(" *TRACK (\d+) AUDIO").match(line)
+                file_match = re.compile('FILE "(.*)" WAVE$').match(line)
+                track_match = re.compile(" *TRACK (\\d+) AUDIO").match(line)
                 if title_match:
                     parsed[current_track]["title"] = title_match[1]
                 elif mbz_track_match:
@@ -100,7 +131,7 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
     private = Graph() # for private audio file to track URI information
     for p in parsed:
         # build a URI component to be used in the various URIs we generate for this release / record
-        ssvUriComponent = quote(p['file_path'].parent.as_posix()).replace(quote(path).rstrip("/"), "").lstrip("/")
+        ssvUriComponent = quote(p['file_path'].parent.as_posix()).replace(quote(path).rstrip("/"), "").lstrip("/").replace('/', '%2F') # encode internal slashes as %2F
         release = URIRef(SSVRelease + str(ssvUriComponent))
         release_event = URIRef(SSVReleaseEvent + str(ssvUriComponent))
         record = URIRef(SSVRecord + str(ssvUriComponent))
@@ -163,6 +194,20 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
             recordGraph.add((record, MO.track, track))
             releaseGraph.add((release, MO.publication_of, signal))
             #--------------SIGNAL--------------#
+            # if we have a file, calculate peaks
+            if 'file' in p[track_num]:
+                # determine audio file path:
+                # strip local track file name from p[track_num]['file'] and append to the path of p['file_path']
+                # n.b. the local track file name may have windows-style backslashes, so we need to tidy up a bit
+                audio_path = os.path.join(p['file_path'].parent, pathlib.Path(p[track_num]['file'].replace('\\','/')).name)
+                audio_path = audio_path.strip()
+                output_path = os.path.join(rdf_dir_path, 'peaks', ssvUriComponent, str(track_num) + '.peaks.json')
+                print("CHECKING AUDIO FILE: |" + audio_path + "|")
+                if os.path.exists(audio_path):
+                    compute_peaks(audio_path, output_path) 
+                    signalGraph.add((signal, SSVO.peaks, URIRef(SSVPeaks + str(ssvUriComponent) + '/' + str(track_num) + '.peaks.json')))
+                else:
+                    warnings.warn("Audio file not found: " + audio_path)
             signalGraph.add((signal, RDF.type, MO.Signal))
             signalGraph.add((signal, MO.published_as, track))
             if 'isrc' in p[track_num]:
@@ -260,7 +305,7 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
             g += performanceGraph
             g += performerGraph
     serializeRdf(g, rdf_file)
-    if private:
+    if private_rdf_file:
         serializeRdf(private, private_rdf_file)
 
 def serializeRdf(g, path):
@@ -330,6 +375,7 @@ if __name__ == '__main__':
         sys.exit("Could not find specified file")
     cue_files = []
     if args.recursive:
+        # find all picard cue files in the specified path
         cue_files = [path for path in pathlib.Path(args.path).rglob('*.cue')]
     else:
         cue_files.append(args.path)
