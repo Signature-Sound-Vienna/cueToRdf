@@ -27,6 +27,7 @@ SSVTrack = Namespace("https://w3id.org/ssv/0.9/data/track/")
 SSVPerformance = Namespace("https://w3id.org/ssv/0.9/data/performance/")
 SSVPerformer = Namespace("https://w3id.org/ssv/0.9/data/performer/")
 SSVPeaks = Namespace("https://w3id.org/ssv/0.9/data/peaks/")
+SSVAudio = Namespace("https://w3id.org/ssv/audio/")
 SSVO = Namespace("https://w3id.org/ssv/0.9/data/vocab#")
 
 def compute_peaks(audio_path, output_path='peaks.json', segment_size=1024):
@@ -64,6 +65,7 @@ def parse_cue_file(file_path, debug):
         parsed["file_path"] = file_path
         parsed["header"] = {}
         current_track = None
+        current_file = None
         for line in lines:
             line = line.strip()
             if current_track is None:
@@ -120,8 +122,13 @@ def parse_cue_file(file_path, debug):
                 elif track_match:
                     current_track = int(track_match[1])
                     parsed[current_track] = {}
+                    if current_file:
+                        parsed[current_track]["file"] = current_file
+                    else:
+                        warnings.warn("No file found for track " + str(current_track))
                 elif file_match:
-                    parsed[current_track]["file"] = file_match[1]
+                    # FILE line comes before TRACK line, so hold on to the file name until we see a TRACK line
+                    current_file = file_match[1]
                 elif debug: 
                     print("skipping line: ", line)
     return parsed
@@ -195,6 +202,7 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
             releaseGraph.add((release, MO.publication_of, signal))
             #--------------SIGNAL--------------#
             # if we have a file, calculate peaks
+            audioUri = ""
             if 'file' in p[track_num]:
                 # determine audio file path:
                 # strip local track file name from p[track_num]['file'] and append to the path of p['file_path']
@@ -206,6 +214,7 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
                 if os.path.exists(audio_path):
                     compute_peaks(audio_path, output_path) 
                     signalGraph.add((signal, SSVO.peaks, URIRef(SSVPeaks + str(ssvUriComponent) + '/' + str(track_num) + '.peaks.json')))
+                    audioUri = URIRef(str(SSVAudio) + str(ssvUriComponent) + "/" + quote(pathlib.Path(audio_path).name))
                 else:
                     warnings.warn("Audio file not found: " + audio_path)
             signalGraph.add((signal, RDF.type, MO.Signal))
@@ -225,6 +234,9 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
             trackGraph.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
             private.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
             private.add((track, SSVO.localPath, Literal(p[track_num].get("file", "__NONE__"))))
+            if audioUri:
+                # if we have found a local audio file, add it to the track under the audio namespace
+                trackGraph.add((track, MO.available_as,audioUri))
             #--------------WORK----------------
             # We can only leap to an authoritative (MusicBrainz) work if:
             # 1. We have a MBz album ID and have received data for it from the API
@@ -376,7 +388,7 @@ if __name__ == '__main__':
     cue_files = []
     if args.recursive:
         # find all picard cue files in the specified path
-        cue_files = [path for path in pathlib.Path(args.path).rglob('*.cue')]
+        cue_files = [path for path in pathlib.Path(args.path).rglob('*picard*.cue')]
     else:
         cue_files.append(args.path)
     parsed = [parse_cue_file(cue_file, args.debug) for cue_file in cue_files]
