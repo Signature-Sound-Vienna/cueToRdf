@@ -138,7 +138,7 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
     private = Graph() # for private audio file to track URI information
     for p in parsed:
         # build a URI component to be used in the various URIs we generate for this release / record
-        ssvUriComponent = quote(p['file_path'].parent.as_posix()).replace(quote(path).rstrip("/"), "").lstrip("/").replace('/', '%2F') # encode internal slashes as %2F
+        ssvUriComponent = quote(p['file_path'].parent.as_posix()).replace(quote(path).rstrip("/"), "").lstrip("/").replace('/', '__') # encode internal slashes as __
         release = URIRef(SSVRelease + str(ssvUriComponent))
         release_event = URIRef(SSVReleaseEvent + str(ssvUriComponent))
         record = URIRef(SSVRecord + str(ssvUriComponent))
