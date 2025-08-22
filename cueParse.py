@@ -68,8 +68,8 @@ def parse_cue_file(file_path, debug):
         current_file = None
         for line in lines:
             line = line.strip()
-            if current_track is None:
-                print(line)
+            if current_track is None and not line.startswith('FILE') and not line.startswith('TRACK'):
+                print("HEADER LINE: " + line)
                 mbz_header_artist_match = re.compile ('REM MUSICBRAINZ_ALBUM_ARTIST_ID (.*)').match(line)
                 mbz_album_match = re.compile ('REM MUSICBRAINZ_ALBUM_ID (.*)').match(line)
                 header_match = re.compile('REM *(.*) (.*)').match(line)
@@ -96,6 +96,7 @@ def parse_cue_file(file_path, debug):
                 elif debug: 
                     print("skipping line: ", line)
             else:
+                print("BODY LINE: " + line)
                 mbz_track_match = re.compile(" *REM MUSICBRAINZ_TRACK_ID (.*$)").match(line)
                 mbz_artist_match = re.compile(" *REM MUSICBRAINZ_ARTIST_ID (.*$)").match(line)
                 title_match = re.compile(" *TITLE (.*$)").match(line)
@@ -128,6 +129,7 @@ def parse_cue_file(file_path, debug):
                         warnings.warn("No file found for track " + str(current_track))
                 elif file_match:
                     # FILE line comes before TRACK line, so hold on to the file name until we see a TRACK line
+                    warnings.warn("Current track " + str(current_track) + ", match: " + str(file_match[1]))
                     current_file = file_match[1]
                 elif debug: 
                     print("skipping line: ", line)
@@ -138,7 +140,8 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
     private = Graph() # for private audio file to track URI information
     for p in parsed:
         # build a URI component to be used in the various URIs we generate for this release / record
-        ssvUriComponent = quote(p['file_path'].parent.as_posix()).replace(quote(path).rstrip("/"), "").lstrip("/").replace('/', '__') # encode internal slashes as __
+        ssvUriComponent = quote(p['file_path'].parent.as_posix()).replace(quote(path).rstrip("/"), "").lstrip("/").replace('/', '__').replace(' ','_').replace('%', '_-') # replace w3id-problematic characters
+        warnings.warn("NEW: " + ssvUriComponent)
         release = URIRef(SSVRelease + str(ssvUriComponent))
         release_event = URIRef(SSVReleaseEvent + str(ssvUriComponent))
         record = URIRef(SSVRecord + str(ssvUriComponent))
@@ -190,6 +193,7 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
         if 'musicbrainz_album_id' in p['header']:
             recordGraph.add((record, MO.musicbrainz, RELEASE.p['header']['musicbrainz_album_id']))
         for track_num in p:
+            warnings.warn(str(track_num))
             if track_num == 'header' or track_num == 'file_path':
                 continue
             tix = str(ssvUriComponent) + '#' + str(track_num)
@@ -210,13 +214,15 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, path, private_rdf_file=False):
                 audio_path = os.path.join(p['file_path'].parent, pathlib.Path(p[track_num]['file'].replace('\\','/')).name)
                 audio_path = audio_path.strip()
                 output_path = os.path.join(rdf_dir_path, 'peaks', ssvUriComponent, str(track_num) + '.peaks.json')
-                print("CHECKING AUDIO FILE: |" + audio_path + "|")
+                warnings.warn("Audio path: |" + audio_path + "|")
                 if os.path.exists(audio_path):
                     compute_peaks(audio_path, output_path) 
                     signalGraph.add((signal, SSVO.peaks, URIRef(SSVPeaks + str(ssvUriComponent) + '/' + str(track_num) + '.peaks.json')))
                     audioUri = URIRef(str(SSVAudio) + str(ssvUriComponent) + "/" + quote(pathlib.Path(audio_path).name))
                 else:
                     warnings.warn("Audio file not found: " + audio_path)
+            else: 
+                warnings.warn("No file in track_num: " + str(track_num))
             signalGraph.add((signal, RDF.type, MO.Signal))
             signalGraph.add((signal, MO.published_as, track))
             if 'isrc' in p[track_num]:
