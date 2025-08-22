@@ -326,7 +326,7 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
             if work:
                 performanceGraph.add((performance, MO.performance_of, work))
             performanceGraph.add((performance, RDFS.label, Literal("Performance: " + p[track_num]["title"])))
-                        #--------------PERFORMER--------------#
+            #--------------PERFORMER--------------#
             performerGraph = Graph()
             performerGraph.add((performer, RDF.type, MO.MusicArtist))
             performerGraph.add((performer, MO.performed, performance))
@@ -337,6 +337,7 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
                 for mbz_artist_id in mbz_artist_ids:
                     performerGraph.add((performer, MO.musicbrainz, URIRef(ARTIST + mbz_artist_id.replace('"', '') )))
             if(rdf_dir_path):
+                # ensure the subdirectories exist
                 for subdir in ["release", "release_event", "record", "track", "signal", "performance", "performer"]:
                     subdir_path = os.path.join(rdf_dir_path, subdir)
                     if not os.path.exists(subdir_path):
