@@ -31,16 +31,16 @@ RELEASE = Namespace("https://musicbrainz.org/work/")
 ISRC = Namespace("https://musicbrainz.org/isrc/")
 RECORDING = Namespace("https://musicbrainz.org/recording/")
 TRACK = Namespace("https://musicbrainz.org/track/")
-SSVRelease = Namespace("https://w3id.org/ssv/0.9/data/release/")
-SSVReleaseEvent = Namespace("https://w3id.org/ssv/0.9/data/release_event/")
-SSVSignal = Namespace("https://w3id.org/ssv/0.9/data/signal/")
-SSVRecord = Namespace("https://w3id.org/ssv/0.9/data/record/")
-SSVTrack = Namespace("https://w3id.org/ssv/0.9/data/track/")
-SSVPerformance = Namespace("https://w3id.org/ssv/0.9/data/performance/")
-SSVPerformer = Namespace("https://w3id.org/ssv/0.9/data/performer/")
-SSVPeaks = Namespace("https://w3id.org/ssv/0.9/data/peaks/")
+SSVRelease = Namespace("https://w3id.org/ssv/data/release/")
+SSVReleaseEvent = Namespace("https://w3id.org/ssv/data/release_event/")
+SSVSignal = Namespace("https://w3id.org/ssv/data/signal/")
+SSVRecord = Namespace("https://w3id.org/ssv/data/record/")
+SSVTrack = Namespace("https://w3id.org/ssv/data/track/")
+SSVPerformance = Namespace("https://w3id.org/ssv/data/performance/")
+SSVPerformer = Namespace("https://w3id.org/ssv/data/performer/")
+SSVPeaks = Namespace("https://w3id.org/ssv/data/peaks/")
 SSVAudio = Namespace("https://w3id.org/ssv/audio/")
-SSVO = Namespace("https://w3id.org/ssv/0.9/data/vocab#")
+SSVO = Namespace("https://w3id.org/ssv/vocab#")
 
 def compute_peaks(audio_path, output_path='peaks.json', segment_size=1024):
     try:
@@ -73,6 +73,12 @@ def compute_peaks(audio_path, output_path='peaks.json', segment_size=1024):
     except Exception as e:
         logging.error(f"Error writing to JSON file: {output_path} - {e}", exc_info=True)
         return
+
+def normalize_path(path):
+    # Remove trailing slashes, convert backslashes to slashes, remove redundant escapes
+    path = os.path.normpath(path)
+    path = path.replace("\\", "/")
+    return path.rstrip("/")
 
 def parse_cue_file(file_path, debug):
     try:
@@ -160,21 +166,35 @@ def parse_cue_file(file_path, debug):
 def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file=False):
     g = Graph() # the full graph
     private = Graph() # for private audio file to track URI information
+    # Normalize all media roots once
+    normalized_roots = [normalize_path(root) for root in media_root_paths]
+    logging.info("Normalized media roots: %s", normalized_roots)
+
     for p in parsed:
         # Find the best matching media root path for this file
-        file_parent = pathlib.Path(p['file_path']).parent.as_posix()
+        file_parent = normalize_path(pathlib.Path(p['file_path']).parent.as_posix())
         best_root = None
         best_len = -1
-        for root in media_root_paths:
-            root_path = pathlib.Path(root).as_posix()
-            if file_parent.startswith(root_path) and len(root_path) > best_len:
-                best_root = root_path
-                best_len = len(root_path)
+        for root in normalized_roots:
+            # Ensure both paths end with a slash for accurate matching
+            root_slash = root if root.endswith("/") else root + "/"
+            file_parent_slash = file_parent if file_parent.endswith("/") else file_parent + "/"
+            if file_parent_slash.startswith(root_slash) and len(root_slash) > best_len:
+                logging.info(f"Matching media root {root} for file {p['file_path']}")
+                best_root = root
+                best_len = len(root_slash)
+            else: 
+                logging.info(f"Not matching media root {root} for file {p['file_path']}")
         if not best_root:
             logging.warning(f"No matching media root for file {p['file_path']}. Using first provided root.")
-            best_root = media_root_paths[0]
-        ssvUriComponent = quote(file_parent).replace(quote(best_root).rstrip("/"), "").lstrip("/").replace('/', '__').replace(' ','_').replace('%', '_-')
+            best_root = normalized_roots[0]
+        # Remove root from file_parent BEFORE quoting
+        root_slash = best_root if best_root.endswith("/") else best_root + "/"
+        rel_path = file_parent[len(root_slash.rstrip("/")):]
+        rel_path = rel_path.lstrip("/\\")
+        ssvUriComponent = quote(rel_path).replace('/', '__').replace(' ','_').replace('%', '_-')
         logging.info("NEW: " + ssvUriComponent)
+        logging.info("Applying media root: " + best_root + " to file path: " + p['file_path'] + " gives rel path: " + rel_path)
         release = URIRef(SSVRelease + str(ssvUriComponent))
         release_event = URIRef(SSVReleaseEvent + str(ssvUriComponent))
         record = URIRef(SSVRecord + str(ssvUriComponent))
