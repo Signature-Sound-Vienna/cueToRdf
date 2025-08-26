@@ -1,4 +1,4 @@
-import argparse, os, sys, pathlib, re, csv, requests, warnings, time, json
+import argparse, os, sys, pathlib, re, csv, requests, warnings, time, json, shutil
 from pprint import pprint
 from rdflib import Graph, Literal, RDF, URIRef, BNode
 from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV, RDFS, XSD
@@ -72,6 +72,77 @@ def get_ssv_namespaces(branch: Optional[str]):
         "SSVAudio": Namespace(base + "audio/"),
         "SSVO": Namespace(base + "vocab#"),
     }
+
+
+def _map_uri_for_branch(u: URIRef, branch: str) -> URIRef:
+    base = "https://w3id.org/ssv/"
+    if not isinstance(u, URIRef):
+        return u
+    s = str(u)
+    if s.startswith(base):
+        # Do not branch audio or vocab
+        if s.startswith(base + "audio/") or s.startswith(base + "vocab#"):
+            return u
+        # Insert branch segment
+        return URIRef(base + branch.strip("/") + "/" + s[len(base):])
+    return u
+
+
+def _remap_graph_for_branch(graph: Graph, branch: str) -> Graph:
+    """Create a new Graph with all eligible SSV URIs remapped to include the branch."""
+    ng = Graph()
+    for s, p, o in graph:
+        ns = _map_uri_for_branch(s, branch) if isinstance(s, URIRef) else s
+        np_ = _map_uri_for_branch(p, branch) if isinstance(p, URIRef) else p
+        no = _map_uri_for_branch(o, branch) if isinstance(o, URIRef) else o
+        ng.add((ns, np_, no))
+    return ng
+
+
+def bind_pretty_prefixes(graph: Graph, branch: Optional[str]) -> None:
+    """Bind readable prefixes so Turtle outputs are cleaner.
+    - 'ssv' points to https://w3id.org/ssv/ (main) or https://w3id.org/ssv/{branch}/ (branch)
+    - Sub-prefixes for data categories point to .../data/<type>/
+    - Audio and vocab are unbranched
+    - Common vocabularies (mo, tl, ev, dcterms, rdfs, xsd, foaf, prov, mb*)
+    """
+    base_root = "https://w3id.org/ssv/"
+    base = base_root if not branch else f"{base_root}{branch.strip('/')}/"
+    ns = get_ssv_namespaces(branch)
+
+    # Core SSV prefixes
+    graph.namespace_manager.bind('ssv', base, override=True)
+    graph.namespace_manager.bind('ssvrel', str(ns['SSVRelease']), override=True)
+    graph.namespace_manager.bind('ssvrevent', str(ns['SSVReleaseEvent']), override=True)
+    graph.namespace_manager.bind('ssvrec', str(ns['SSVRecord']), override=True)
+    graph.namespace_manager.bind('ssvtrack', str(ns['SSVTrack']), override=True)
+    graph.namespace_manager.bind('ssvsignal', str(ns['SSVSignal']), override=True)
+    graph.namespace_manager.bind('ssvperf', str(ns['SSVPerformance']), override=True)
+    graph.namespace_manager.bind('ssvperformer', str(ns['SSVPerformer']), override=True)
+    graph.namespace_manager.bind('ssvpeaks', str(ns['SSVPeaks']), override=True)
+    graph.namespace_manager.bind('ssvaudio', str(ns['SSVAudio']), override=True)  # unbranched
+    graph.namespace_manager.bind('ssvo', str(ns['SSVO']), override=True)          # unbranched
+
+    # Music Ontology and friends
+    graph.namespace_manager.bind('mo', str(MO), override=False)
+    graph.namespace_manager.bind('tl', str(TL), override=False)
+    graph.namespace_manager.bind('ev', str(EV), override=False)
+    graph.namespace_manager.bind('dcterms', str(DCTERMS), override=False)
+    graph.namespace_manager.bind('rdfs', str(RDFS), override=False)
+    graph.namespace_manager.bind('xsd', str(XSD), override=False)
+    graph.namespace_manager.bind('foaf', str(FOAF), override=False)
+    graph.namespace_manager.bind('prov', str(PROV), override=False)
+
+    # MusicBrainz convenience prefixes
+    graph.namespace_manager.bind('mbartist', str(ARTIST), override=False)
+    graph.namespace_manager.bind('mbwork', str(WORK), override=False)
+    graph.namespace_manager.bind('mbrelease', str(RELEASE), override=False)
+    graph.namespace_manager.bind('mbisrc', str(ISRC), override=False)
+    graph.namespace_manager.bind('mbrec', str(RECORDING), override=False)
+    graph.namespace_manager.bind('mbtrack', str(TRACK), override=False)
+
+
+ 
 
 def compute_peaks(audio_path, output_path='peaks.json', segment_size=1024):
     try:
@@ -194,11 +265,27 @@ def parse_cue_file(file_path, debug):
                 logging.debug("skipping line: " + line)
     return parsed
 
-def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file=False, branch: Optional[str] = None):
-    g = Graph() # the full graph
-    private = Graph() # for private audio file to track URI information
-    # Select Namespaces for this branch (locals shadow globals below)
-    ns = get_ssv_namespaces(branch)
+ 
+
+
+def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
+    """
+    Build the canonical (unbranched) RDF content once.
+    Returns: (full_graph, private_graph, locals_dict)
+    - locals_dict: {subdir: [(graph, ssvUriComponent), ...]}
+    Peaks files are written only if peaks_root_dir is provided.
+    """
+    g = Graph()
+    private = Graph()
+    locals_dict: dict[str, list[tuple[Graph, str]]] = {s: [] for s in [
+        "release", "release_event", "record", "track", "signal", "performance", "performer"
+    ]}
+
+    normalized_roots = [normalize_path(root) for root in media_root_paths]
+    logging.info("Normalized media roots: %s", normalized_roots)
+
+    # Use unbranched namespaces for building
+    ns = get_ssv_namespaces(None)
     SSVRelease = ns["SSVRelease"]
     SSVReleaseEvent = ns["SSVReleaseEvent"]
     SSVSignal = ns["SSVSignal"]
@@ -207,44 +294,36 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
     SSVPerformance = ns["SSVPerformance"]
     SSVPerformer = ns["SSVPerformer"]
     SSVPeaks = ns["SSVPeaks"]
-    SSVAudio = ns["SSVAudio"]  # intentionally unbranched
-    SSVO = ns["SSVO"]          # intentionally unbranched
-    # Normalize all media roots once
-    normalized_roots = [normalize_path(root) for root in media_root_paths]
-    logging.info("Normalized media roots: %s", normalized_roots)
+    SSVAudio = ns["SSVAudio"]
+    SSVO = ns["SSVO"]
 
     for p in parsed:
-        # Find the best matching media root path for this file
         file_parent = normalize_path(pathlib.Path(p['file_path']).parent.as_posix())
         best_root = None
         best_len = -1
         for root in normalized_roots:
-            # Ensure both paths end with a slash for accurate matching
             root_slash = root if root.endswith("/") else root + "/"
             file_parent_slash = file_parent if file_parent.endswith("/") else file_parent + "/"
             if file_parent_slash.startswith(root_slash) and len(root_slash) > best_len:
                 logging.info(f"Matching media root {root} for file {p['file_path']}")
                 best_root = root
                 best_len = len(root_slash)
-            else: 
+            else:
                 logging.info(f"Not matching media root {root} for file {p['file_path']}")
         if not best_root:
             logging.warning(f"No matching media root for file {p['file_path']}. Using first provided root.")
             best_root = normalized_roots[0]
-        # Remove root from file_parent BEFORE quoting
         root_slash = best_root if best_root.endswith("/") else best_root + "/"
         rel_path = file_parent[len(root_slash.rstrip("/")):]
         rel_path = rel_path.lstrip("/\\")
         ssvUriComponent = quote(rel_path).replace('/', '__').replace(' ','_').replace('%', '_-')
-        logging.info("NEW: " + ssvUriComponent)
-        logging.info("Applying media root: " + best_root + " to file path: " + p['file_path'] + " gives rel path: " + rel_path)
+
         release = URIRef(SSVRelease + str(ssvUriComponent))
         release_event = URIRef(SSVReleaseEvent + str(ssvUriComponent))
         record = URIRef(SSVRecord + str(ssvUriComponent))
         mbz_album_json = None
         if 'mbz_album_id' in p['header']:
-            # if we have musicbrainz identifiers, request them from mbz...
-            time.sleep(0.3) # be polite
+            time.sleep(0.3)
             try:
                 r = requests.get("https://musicbrainz.org/album/" + p['header']['mbz_album_id'], headers={"Accept": "application/ld+json"})
                 r.raise_for_status()
@@ -254,21 +333,18 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
                 logging.warning("Could not GET Musicbrainz album %s: %s", p['header']['mbz_album_id'], err)
             except Exception as e:
                 logging.error(f"Error fetching MusicBrainz album {p['header']['mbz_album_id']}: {e}", exc_info=True)
-        if mbz_album_json: 
-            logging.debug("MusicBrainz album JSON: %s", mbz_album_json)
 
-        #--------------RELEASE--------------#
+        # RELEASE
         releaseGraph = Graph()
         releaseGraph.add((release, RDF.type, MO.Release))
         releaseGraph.add((release, DCTERMS.title, Literal(p['header'].get('title', '__NONE__'))))
         releaseGraph.add((release, RDFS.label, Literal("Release: " + p['header'].get('title', '__NONE__'))))
-        #releaseGraph.add((SSVRelease, MO.catalogue_number, p['header'].get('cddbcat', '__NONE__'))
         releaseGraph.add((release, MO.catalogue_number, Literal(p['header'].get('catalogue_number', '__NONE__'))))
         releaseGraph.add((release, MO.record, record))
-        # add release graph to the main graph
         g += releaseGraph
-        
-        #-----------RELEASE EVENT----------#
+        locals_dict["release"].append((releaseGraph, ssvUriComponent))
+
+        # RELEASE EVENT
         releaseEventGraph = Graph()
         releaseEventGraph.add((release_event, RDF.type, MO.ReleaseEvent))
         releaseEventGraph.add((release_event, RDF.type, EV.Event))
@@ -277,10 +353,10 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
         releaseEventGraph.add((release_event, EV.time, release_event_time))
         releaseEventGraph.add((release_event_time, RDF.type, TL.Instant))
         releaseEventGraph.add((release_event_time, TL.atYear, Literal(p['header'].get('date', '__NONE__'), datatype=XSD.gYear)))
-        # add release graph to the main graph
         g += releaseEventGraph
+        locals_dict["release_event"].append((releaseEventGraph, ssvUriComponent))
 
-        #--------------RECORD, TRACK, SIGNAL--------------#
+        # RECORD, TRACK, SIGNAL
         recordGraph = Graph()
         trackGraph = Graph()
         signalGraph = Graph()
@@ -289,8 +365,8 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
         recordGraph.add((record, MO.track_count, Literal(len(p)-1)))
         if 'musicbrainz_album_id' in p['header']:
             recordGraph.add((record, MO.musicbrainz, RELEASE.p['header']['musicbrainz_album_id']))
+
         for track_num in p:
-            logging.info("Processing track_num: %s", str(track_num))
             if track_num == 'header' or track_num == 'file_path':
                 continue
             tix = str(ssvUriComponent) + '#' + str(track_num)
@@ -301,31 +377,32 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
 
             recordGraph.add((record, MO.track, track))
             releaseGraph.add((release, MO.publication_of, signal))
-            #--------------SIGNAL--------------#
-            # if we have a file, calculate peaks
+
+            # SIGNAL
             audioUri = ""
             if 'file' in p[track_num] and p[track_num]['file'] != "__SKIP__":
-                # determine audio file path:
-                # strip local track file name from p[track_num]['file'] and append to the path of p['file_path']
-                # n.b. the local track file name may have windows-style backslashes, so we need to tidy up a bit
                 audio_path = os.path.join(pathlib.Path(p['file_path']).parent, pathlib.Path(p[track_num]['file'].replace('\\','/')).name)
                 audio_path = audio_path.strip()
-                output_path = os.path.join(rdf_dir_path, 'peaks', ssvUriComponent, str(track_num) + '.peaks.json')
+                if peaks_root_dir:
+                    output_path = os.path.join(peaks_root_dir, 'peaks', ssvUriComponent, str(track_num) + '.peaks.json')
+                else:
+                    output_path = None
                 logging.info("Audio path: |%s|", audio_path)
-                if os.path.exists(audio_path):
-                    compute_peaks(audio_path, output_path) 
+                if os.path.exists(audio_path) and output_path:
+                    compute_peaks(audio_path, output_path)
                     signalGraph.add((signal, SSVO.peaks, URIRef(SSVPeaks + str(ssvUriComponent) + '/' + str(track_num) + '.peaks.json')))
                     audioUri = URIRef(str(SSVAudio) + str(ssvUriComponent) + "/" + quote(pathlib.Path(audio_path).name))
-                else:
+                elif not os.path.exists(audio_path):
                     logging.warning("Audio file not found: %s", audio_path)
-            else: 
+            else:
                 logging.warning("No file in track_num: %s", str(track_num))
             signalGraph.add((signal, RDF.type, MO.Signal))
             signalGraph.add((signal, MO.published_as, track))
             if 'isrc' in p[track_num]:
                 isrc = p[track_num]['isrc']
                 signalGraph.add((signal, MO.isrc, URIRef(ISRC + isrc)))
-            #--------------TRACK--------------#
+
+            # TRACK
             trackGraph.add((track, RDF.type, MO.Track))
             private.add((track, RDF.type, MO.Track))
             if 'mbz_track' in p[track_num]:
@@ -338,83 +415,67 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
             private.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
             private.add((track, SSVO.localPath, Literal(p[track_num].get("file", "__NONE__"))))
             if audioUri:
-                # if we have found a local audio file, add it to the track under the audio namespace
                 trackGraph.add((track, MO.available_as,audioUri))
-            #--------------WORK----------------
-            # We can only leap to an authoritative (MusicBrainz) work if:
-            # 1. We have a MBz album ID and have received data for it from the API
-            # 2. The corresponding track entry has a work associated with it on MBz
+
+            # WORK via MBZ
             work = None
             if mbz_album_json:
-                # First, locate the current track in the album data
                 mbz_tracks_json = mbz_album_json.get('track', [])
-                try: 
-                    # mbz has track numbers like 1.13 (13th track on disc 1)
-                    # filter out just the track num itself and compare it to our p track_num
-                    print("Looking for track num: ", str(track_num))
+                try:
                     mbz_track_json = [t for t in mbz_tracks_json if t['trackNumber'][t['trackNumber'].index(".")+1:] == str(track_num)]
                 except Exception as e:
                     logging.error("Unexpected trackNumber format: %s", e, exc_info=True)
                     continue
-                #if we have more than one match (e.g., because multiple discs) try to disambiguate with title similarity
                 if len(mbz_track_json) > 1:
                     similarities = [fuzz.ratio(t['name'], p[track_num]['title']) for t in mbz_track_json]
                     close_match_indices = [ix for ix, val in enumerate(similarities) if val > 90]
                     mbz_track_json = [mbz_track_json[i] for i in close_match_indices]
-                # if we still have more than one match, warn the user (and default to first close-similarity match)
                 if len(mbz_track_json) > 1:
                     logging.warning("Multiple matches on track disambiguation, please sort manually: %s ##### %s", mbz_track_json, p[track_num])
                 if len(mbz_track_json) == 0:
-                    logging.warning("Can't find unique matching cue track name %s", p[track_num]["title"])
-                else: 
+                    logging.warning("Can't find unique matching cue track name %s", p[track_num]["title"]) 
+                else:
                     if 'recordingOf' in mbz_track_json[0]:
                         rec = mbz_track_json[0]['recordingOf']
                         if isinstance(rec, list):
-                            # associated with multiple works - suspicious...
                             logging.warning("Track associated with multiple works: %s", mbz_track_json[0].get("@id", ""))
                         else:
                             rec = [rec]
                         for r in rec:
                             work = URIRef(r['@id'])
-                            # add these straight to the full graph, we don't need to republish mbz individually
                             g.add((work, RDF.type, MO.MusicalWork))
                             g.add((work, DCTERMS.title, Literal(r['name'])))
                             g.add((work, RDFS.label, Literal("Work: " + r['name'])))
                     else:
                         logging.warning("No work associated with MBz track: %s", mbz_track_json[0].get("@id", ""))
-            #--------------PERFORMANCE--------------#
+
+            # PERFORMANCE
             performanceGraph = Graph()
             performanceGraph.add((performance, RDF.type, MO.Performance))
             performanceGraph.add((performance, MO.recorded_as, signal))
             if work:
                 performanceGraph.add((performance, MO.performance_of, work))
             performanceGraph.add((performance, RDFS.label, Literal("Performance: " + p[track_num]["title"])))
-            #--------------PERFORMER--------------#
+
+            # PERFORMER
             performerGraph = Graph()
             performerGraph.add((performer, RDF.type, MO.MusicArtist))
             performerGraph.add((performer, MO.performed, performance))
             performerGraph.add((performer, FOAF.name, Literal(p[track_num]["performer"])))
             performerGraph.add((performer, RDFS.label, Literal("Performer: " + p[track_num]["performer"])))
             if 'mbz_artist' in p[track_num]:
-                mbz_artist_ids = p[track_num]['mbz_artist'].split("; ") 
+                mbz_artist_ids = p[track_num]['mbz_artist'].split("; ")
                 for mbz_artist_id in mbz_artist_ids:
-                    performerGraph.add((performer, MO.musicbrainz, URIRef(ARTIST + mbz_artist_id.replace('"', '') )))
-            if(rdf_dir_path):
-                # ensure the subdirectories exist
-                for subdir in ["release", "release_event", "record", "track", "signal", "performance", "performer"]:
-                    subdir_path = os.path.join(rdf_dir_path, subdir)
-                    if not os.path.exists(subdir_path):
-                        try:
-                            os.makedirs(subdir_path)
-                        except Exception as e:
-                            logging.error(f"Error creating RDF subdir {subdir_path}: {e}", exc_info=True)
-                            continue
-                    # for each subdir, serialize the corresponding graph
-                    local_graph_name = subdir + "Graph"
-                    local_graph = locals().get(local_graph_name)
-                    if local_graph:
-                        serializeRdf(local_graph, os.path.join(subdir_path, str(ssvUriComponent)))
-            # add each local graph to the main graph
+                    performerGraph.add((performer, MO.musicbrainz, URIRef(ARTIST + mbz_artist_id.replace('"', ''))))
+
+            # Collect locals
+            locals_dict["record"].append((recordGraph, ssvUriComponent))
+            locals_dict["track"].append((trackGraph, ssvUriComponent))
+            locals_dict["signal"].append((signalGraph, ssvUriComponent))
+            locals_dict["performance"].append((performanceGraph, ssvUriComponent))
+            locals_dict["performer"].append((performerGraph, ssvUriComponent))
+
+            # Merge into global graph
             g += releaseGraph
             g += releaseEventGraph
             g += recordGraph
@@ -422,22 +483,8 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
             g += signalGraph
             g += performanceGraph
             g += performerGraph
-    # Ensure parent dir for aggregate outputs exists (when writing into branch folders)
-    try:
-        parent = os.path.dirname(rdf_file)
-        if parent and not os.path.exists(parent):
-            os.makedirs(parent, exist_ok=True)
-    except Exception as e:
-        logging.error(f"Error ensuring directory for {rdf_file}: {e}", exc_info=True)
-    serializeRdf(g, rdf_file)
-    if private_rdf_file:
-        try:
-            parent = os.path.dirname(private_rdf_file)
-            if parent and not os.path.exists(parent):
-                os.makedirs(parent, exist_ok=True)
-        except Exception as e:
-            logging.error(f"Error ensuring directory for {private_rdf_file}: {e}", exc_info=True)
-        serializeRdf(private, private_rdf_file)
+
+    return g, private, locals_dict
 
 def serializeRdf(g, path):
     try:
@@ -552,28 +599,83 @@ if __name__ == '__main__':
             audio_filename_rdf = args.audio_filename_rdf
 
         branches = args.branches or []
-        if branches:
-            # When branches are provided, create a 'main' folder and one per branch under the output folder
-            # Determine the base output folder
-            if rdf_dir_path:
-                base_out_dir = rdf_dir_path
-            else:
-                base_out_dir = os.path.dirname(args.rdf_file) or "."
-            # Prepare list: [('main', None), (branch, branch), ...]
-            targets = [("main", None)] + [(b, b) for b in branches]
-            base_rdf_name = os.path.basename(args.rdf_file)
 
-            for folder_name, branch_name in targets:
-                out_dir = os.path.join(base_out_dir, folder_name)
-                # Aggregate output path goes inside this folder
-                agg_path = os.path.join(out_dir, base_rdf_name)
-                # Per-entity outputs go into this folder only if -D was given
-                per_entity_dir = out_dir if args.rdf_directory else False
-                # Private per-folder RDF if requested
-                private_path = os.path.join(out_dir, os.path.basename(audio_filename_rdf)) if audio_filename_rdf else False
-                write_rdf(parsed, agg_path, per_entity_dir, media_root_paths, private_path, branch=branch_name)
+        # Build canonical graphs once (unbranched). Peaks written into appropriate root if per-entity dir exists.
+        # Choose a peaks root: if we have a per-entity dir, use it; else use dirname of rdf_file.
+        if branches:
+            base_out_dir = rdf_dir_path if rdf_dir_path else (os.path.dirname(args.rdf_file) or ".")
+            peaks_root = os.path.join(base_out_dir, "main")  # compute peaks under main
         else:
-            # No branches provided -> behave as before (no extra folders)
-            write_rdf(parsed, args.rdf_file, rdf_dir_path, media_root_paths, audio_filename_rdf)
+            peaks_root = rdf_dir_path if rdf_dir_path else (os.path.dirname(args.rdf_file) or ".")
+
+        full_graph, private_graph, locals_dict = build_rdf_content(parsed, media_root_paths, peaks_root_dir=peaks_root)
+
+        def write_aggregate(graph: Graph, out_path: str, branch_ctx: Optional[str]):
+            parent = os.path.dirname(out_path)
+            if parent and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
+            bind_pretty_prefixes(graph, branch_ctx)
+            serializeRdf(graph, out_path)
+
+        if branches:
+            # write main (unbranched)
+            base_rdf_name = os.path.basename(args.rdf_file)
+            out_dir_main = os.path.join(base_out_dir, "main")
+            agg_main = os.path.join(out_dir_main, base_rdf_name)
+            write_aggregate(full_graph, agg_main, None)
+            if audio_filename_rdf:
+                write_aggregate(private_graph, os.path.join(out_dir_main, os.path.basename(audio_filename_rdf)), None)
+            # per-entity for main
+            if args.rdf_directory:
+                for subdir, items in locals_dict.items():
+                    subdir_path = os.path.join(out_dir_main, subdir)
+                    os.makedirs(subdir_path, exist_ok=True)
+                    for local_graph, key in items:
+                        bind_pretty_prefixes(local_graph, None)
+                        serializeRdf(local_graph, os.path.join(subdir_path, key))
+
+            # Now branch serializations by remapping URIs only
+            for branch in branches:
+                out_dir = os.path.join(base_out_dir, branch)
+                agg_path = os.path.join(out_dir, base_rdf_name)
+                # Remap aggregate
+                branched_graph = _remap_graph_for_branch(full_graph, branch)
+                write_aggregate(branched_graph, agg_path, branch)
+                # Private graph should remain unbranched (contains local paths and MBZ links)
+                if audio_filename_rdf:
+                    write_aggregate(private_graph, os.path.join(out_dir, os.path.basename(audio_filename_rdf)), None)
+                # Per-entity
+                if args.rdf_directory:
+                    for subdir, items in locals_dict.items():
+                        subdir_path = os.path.join(out_dir, subdir)
+                        os.makedirs(subdir_path, exist_ok=True)
+                        for local_graph, key in items:
+                            remapped = _remap_graph_for_branch(local_graph, branch)
+                            bind_pretty_prefixes(remapped, branch)
+                            serializeRdf(remapped, os.path.join(subdir_path, key))
+                # Copy peaks files from main into each branch folder
+                # We only need to replicate files on disk; URIs in RDF are remapped via graph.
+                peaks_src = os.path.join(out_dir_main, 'peaks')
+                peaks_dst = os.path.join(out_dir, 'peaks')
+                if os.path.exists(peaks_src):
+                    try:
+                        if os.path.exists(peaks_dst):
+                            shutil.rmtree(peaks_dst)
+                        shutil.copytree(peaks_src, peaks_dst)
+                    except Exception as e:
+                        logging.error(f"Error copying peaks from {peaks_src} to {peaks_dst}: {e}", exc_info=True)
+        else:
+            # No branches -> write as before, single set
+            out_path = args.rdf_file
+            write_aggregate(full_graph, out_path, None)
+            if audio_filename_rdf:
+                write_aggregate(private_graph, audio_filename_rdf, None)
+            if args.rdf_directory:
+                for subdir, items in locals_dict.items():
+                    subdir_path = os.path.join(rdf_dir_path, subdir) if rdf_dir_path else os.path.join(os.path.dirname(out_path) or '.', subdir)
+                    os.makedirs(subdir_path, exist_ok=True)
+                    for local_graph, key in items:
+                        bind_pretty_prefixes(local_graph, None)
+                        serializeRdf(local_graph, os.path.join(subdir_path, key))
     if not args.quiet: 
         pprint(parsed)
