@@ -213,6 +213,12 @@ def normalize_path(path):
     path = path.replace("\\", "/")
     return path.rstrip("/")
 
+def _val_ok(v) -> bool:
+    try:
+        return v is not None and str(v).strip() != '' and str(v) != '__NONE__'
+    except Exception:
+        return False
+
 def extract_year(date_str: Optional[str]) -> Optional[str]:
     if not date_str or not isinstance(date_str, str):
         return None
@@ -419,11 +425,14 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
         # RELEASE
         releaseGraph = Graph()
         releaseGraph.add((release, RDF.type, MO.Release))
-        releaseGraph.add((release, DCTERMS.title, Literal(p['header'].get('title', '__NONE__'))))
-        releaseGraph.add((release, RDFS.label, Literal("Release: " + p['header'].get('title', '__NONE__'))))
+        title_hdr = p['header'].get('title')
+        if _val_ok(title_hdr):
+            releaseGraph.add((release, DCTERMS.title, Literal(title_hdr)))
+            releaseGraph.add((release, RDFS.label, Literal("Release: " + title_hdr)))
         # Catalogue number from CATALOG or cddbcat
-        catno = p['header'].get('catalog') or p['header'].get('cddbcat') or '__NONE__'
-        releaseGraph.add((release, MO.catalogue_number, Literal(catno)))
+        catno = p['header'].get('catalog') or p['header'].get('cddbcat')
+        if _val_ok(catno):
+            releaseGraph.add((release, MO.catalogue_number, Literal(catno)))
         releaseGraph.add((release, MO.record, record))
         if mbid_clean:
             releaseGraph.add((release, MO.musicbrainz, URIRef(RELEASE + mbid_clean)))
@@ -444,7 +453,7 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
             issued_date = ws_release_json.get('date') or None
         if not issued_date:
             issued_date = p['header'].get('date')
-        if issued_date:
+        if _val_ok(issued_date):
             # Only type as xsd:date when month/day are not '00'
             if re.match(r"^\d{4}-\d{2}-\d{2}$", issued_date) and ('-00-' not in issued_date and not issued_date.endswith('-00')):
                 releaseEventGraph.add((release, DCTERMS.issued, Literal(issued_date, datatype=XSD.date)))
@@ -466,10 +475,10 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
                 if lb_id:
                     lb_uri = URIRef(LABEL + lb_id)
                     g.add((lb_uri, RDF.type, FOAF.Organization))
-                    if lb_name:
+                    if _val_ok(lb_name):
                         g.add((lb_uri, FOAF.name, Literal(lb_name)))
                     releaseGraph.add((release, DCTERMS.publisher, lb_uri))
-                if catno2:
+                if _val_ok(catno2):
                     releaseGraph.add((release, MO.catalogue_number, Literal(catno2)))
 
         # RECORD, TRACK, SIGNAL
@@ -477,7 +486,8 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
         trackGraph = Graph()
         signalGraph = Graph()
         recordGraph.add((record, RDF.type, MO.Record))
-        recordGraph.add((record, RDFS.label, Literal("Record: " + p['header'].get('title', '__NONE__'))))
+        if _val_ok(title_hdr):
+            recordGraph.add((record, RDFS.label, Literal("Record: " + title_hdr)))
         recordGraph.add((record, MO.track_count, Literal(len(p)-1)))
         if mbid_clean:
             recordGraph.add((record, MO.musicbrainz, URIRef(RELEASE + mbid_clean)))
@@ -527,9 +537,12 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
                 private.add((track, MO.musicbrainz, URIRef(TRACK + mbz_track_id)))
             trackGraph.add((track, MO.track_number, Literal(int(track_num))))
             private.add((track, MO.track_number, Literal(int(track_num))))
-            trackGraph.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
-            private.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
-            private.add((track, SSVO.localPath, Literal(p[track_num].get("file", "__NONE__"))))
+            if _val_ok(p[track_num].get("title")):
+                trackGraph.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
+                private.add((track, RDFS.label, Literal("Track: " + p[track_num]["title"])))
+            local_path = p[track_num].get("file")
+            if _val_ok(local_path):
+                private.add((track, SSVO.localPath, Literal(local_path)))
             if audioUri:
                 trackGraph.add((track, MO.available_as,audioUri))
 
@@ -615,14 +628,17 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
             performanceGraph.add((performance, MO.recorded_as, signal))
             if work:
                 performanceGraph.add((performance, MO.performance_of, work))
-            performanceGraph.add((performance, RDFS.label, Literal("Performance: " + p[track_num]["title"])))
+            if _val_ok(p[track_num].get("title")):
+                performanceGraph.add((performance, RDFS.label, Literal("Performance: " + p[track_num]["title"])))
 
             # PERFORMER
             performerGraph = Graph()
             performerGraph.add((performer, RDF.type, MO.MusicArtist))
             performerGraph.add((performer, MO.performed, performance))
-            performerGraph.add((performer, FOAF.name, Literal(p[track_num]["performer"])))
-            performerGraph.add((performer, RDFS.label, Literal("Performer: " + p[track_num]["performer"])))
+            perf_name = p[track_num].get("performer")
+            if _val_ok(perf_name):
+                performerGraph.add((performer, FOAF.name, Literal(perf_name)))
+                performerGraph.add((performer, RDFS.label, Literal("Performer: " + perf_name)))
             if 'mbz_artist' in p[track_num]:
                 mbz_artist_ids = p[track_num]['mbz_artist'].split("; ")
                 for mbz_artist_id in mbz_artist_ids:
