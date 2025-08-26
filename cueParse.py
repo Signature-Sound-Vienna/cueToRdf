@@ -406,7 +406,7 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
                     url = f"https://musicbrainz.org/ws/2/release/{mbid_clean}"
                     rr = mb_get(
                         url,
-                        params={"inc": "recordings labels release-events", "fmt": "json"},
+                        params={"inc": "recordings labels", "fmt": "json"},
                         timeout=20
                     )
                     if rr.status_code >= 400:
@@ -438,19 +438,15 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
         release_event_time = BNode()
         releaseEventGraph.add((release_event, EV.time, release_event_time))
         releaseEventGraph.add((release_event_time, RDF.type, TL.Instant))
-        # dates from WS/2 release-events if available, fallback to header date
+        # date from WS/2 release (top-level 'date' can be partial, e.g., 1999 or 1999-00-00); fallback to header
         issued_date = None
         if ws_release_json:
-            dates = [e.get('date') for e in ws_release_json.get('release-events', []) if e.get('date')]
-            if dates:
-                try:
-                    issued_date = sorted(dates)[0]
-                except Exception:
-                    issued_date = dates[0]
+            issued_date = ws_release_json.get('date') or None
         if not issued_date:
             issued_date = p['header'].get('date')
         if issued_date:
-            if re.match(r"^\d{4}-\d{2}-\d{2}$", issued_date):
+            # Only type as xsd:date when month/day are not '00'
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", issued_date) and ('-00-' not in issued_date and not issued_date.endswith('-00')):
                 releaseEventGraph.add((release, DCTERMS.issued, Literal(issued_date, datatype=XSD.date)))
             else:
                 releaseEventGraph.add((release, DCTERMS.issued, Literal(issued_date)))
