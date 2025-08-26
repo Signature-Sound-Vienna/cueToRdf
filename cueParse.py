@@ -2,6 +2,7 @@ import argparse, os, sys, pathlib, re, csv, requests, warnings, time, json
 from pprint import pprint
 from rdflib import Graph, Literal, RDF, URIRef, BNode
 from rdflib.namespace import Namespace, DCTERMS, FOAF, PROV, RDFS, XSD
+from typing import Optional
 from urllib.parse import quote
 from fuzzywuzzy import fuzz
 import librosa
@@ -31,6 +32,7 @@ RELEASE = Namespace("https://musicbrainz.org/work/")
 ISRC = Namespace("https://musicbrainz.org/isrc/")
 RECORDING = Namespace("https://musicbrainz.org/recording/")
 TRACK = Namespace("https://musicbrainz.org/track/")
+# Base SSV namespaces (unbranched defaults)
 SSVRelease = Namespace("https://w3id.org/ssv/data/release/")
 SSVReleaseEvent = Namespace("https://w3id.org/ssv/data/release_event/")
 SSVSignal = Namespace("https://w3id.org/ssv/data/signal/")
@@ -39,8 +41,37 @@ SSVTrack = Namespace("https://w3id.org/ssv/data/track/")
 SSVPerformance = Namespace("https://w3id.org/ssv/data/performance/")
 SSVPerformer = Namespace("https://w3id.org/ssv/data/performer/")
 SSVPeaks = Namespace("https://w3id.org/ssv/data/peaks/")
-SSVAudio = Namespace("https://w3id.org/ssv/audio/")
-SSVO = Namespace("https://w3id.org/ssv/vocab#")
+SSVAudio = Namespace("https://w3id.org/ssv/audio/")  # never branched
+SSVO = Namespace("https://w3id.org/ssv/vocab#")      # never branched
+
+
+def get_ssv_namespaces(branch: Optional[str]):
+    """
+    Return a dict of SSV Namespaces adjusted for the given branch name.
+    Branching rule: for namespaces starting with https://w3id.org/ssv/ (data/*),
+    prefix becomes https://w3id.org/ssv/{branch}/... except SSVAudio and SSVO which never branch.
+    """
+    base = "https://w3id.org/ssv/"
+    # Normalize branch segment
+    if branch:
+        branch = branch.strip().strip("/")
+        prefix = f"{base}{branch}/"
+    else:
+        prefix = base
+
+    # Build Namespaces (audio and vocab do not branch)
+    return {
+        "SSVRelease": Namespace(prefix + "data/release/"),
+        "SSVReleaseEvent": Namespace(prefix + "data/release_event/"),
+        "SSVSignal": Namespace(prefix + "data/signal/"),
+        "SSVRecord": Namespace(prefix + "data/record/"),
+        "SSVTrack": Namespace(prefix + "data/track/"),
+        "SSVPerformance": Namespace(prefix + "data/performance/"),
+        "SSVPerformer": Namespace(prefix + "data/performer/"),
+        "SSVPeaks": Namespace(prefix + "data/peaks/"),
+        "SSVAudio": Namespace(base + "audio/"),
+        "SSVO": Namespace(base + "vocab#"),
+    }
 
 def compute_peaks(audio_path, output_path='peaks.json', segment_size=1024):
     try:
@@ -163,9 +194,21 @@ def parse_cue_file(file_path, debug):
                 logging.debug("skipping line: " + line)
     return parsed
 
-def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file=False):
+def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file=False, branch: Optional[str] = None):
     g = Graph() # the full graph
     private = Graph() # for private audio file to track URI information
+    # Select Namespaces for this branch (locals shadow globals below)
+    ns = get_ssv_namespaces(branch)
+    SSVRelease = ns["SSVRelease"]
+    SSVReleaseEvent = ns["SSVReleaseEvent"]
+    SSVSignal = ns["SSVSignal"]
+    SSVRecord = ns["SSVRecord"]
+    SSVTrack = ns["SSVTrack"]
+    SSVPerformance = ns["SSVPerformance"]
+    SSVPerformer = ns["SSVPerformer"]
+    SSVPeaks = ns["SSVPeaks"]
+    SSVAudio = ns["SSVAudio"]  # intentionally unbranched
+    SSVO = ns["SSVO"]          # intentionally unbranched
     # Normalize all media roots once
     normalized_roots = [normalize_path(root) for root in media_root_paths]
     logging.info("Normalized media roots: %s", normalized_roots)
@@ -379,8 +422,21 @@ def write_rdf(parsed, rdf_file, rdf_dir_path, media_root_paths, private_rdf_file
             g += signalGraph
             g += performanceGraph
             g += performerGraph
+    # Ensure parent dir for aggregate outputs exists (when writing into branch folders)
+    try:
+        parent = os.path.dirname(rdf_file)
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+    except Exception as e:
+        logging.error(f"Error ensuring directory for {rdf_file}: {e}", exc_info=True)
     serializeRdf(g, rdf_file)
     if private_rdf_file:
+        try:
+            parent = os.path.dirname(private_rdf_file)
+            if parent and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
+        except Exception as e:
+            logging.error(f"Error ensuring directory for {private_rdf_file}: {e}", exc_info=True)
         serializeRdf(private, private_rdf_file)
 
 def serializeRdf(g, path):
@@ -451,6 +507,7 @@ if __name__ == '__main__':
     parser.add_argument('-D', '--rdfdirectory', dest='rdf_directory', help='Write RDF (TTL) files to specified directory', required=False)
     parser.add_argument('-A', '--audioFilenameRdf', dest='audio_filename_rdf', help='Write private audio file to track URI information to RDF (TTL) file', required=False)
     parser.add_argument('-m', '--mediaroot', dest="media_root_paths", help='Media root path, to be overridden in URI generation', required=False, action='append')
+    parser.add_argument('-b', '--branch', dest='branches', help='Branch name to include in SSV data namespaces; repeatable', required=False, action='append')
     parser.add_argument('-q', '--quiet', dest='quiet', help="Suppress printing parse results to terminal", action='store_true')
     parser.add_argument('path', help="Cue file, or folder containing (folders containing) cue files if --recursive specified")
     args = parser.parse_args()
@@ -478,6 +535,7 @@ if __name__ == '__main__':
     if args.tracks_csv_file:
         write_tracks_csv(parsed, args.tracks_csv_file)
     if args.rdf_file:
+        # Determine media roots
         rdf_dir_path = False
         if args.rdf_directory:
             rdf_dir_path = args.rdf_directory
@@ -492,6 +550,30 @@ if __name__ == '__main__':
             sys.exit(1)
         if args.audio_filename_rdf:
             audio_filename_rdf = args.audio_filename_rdf
-        write_rdf(parsed, args.rdf_file, rdf_dir_path, media_root_paths, audio_filename_rdf)
+
+        branches = args.branches or []
+        if branches:
+            # When branches are provided, create a 'main' folder and one per branch under the output folder
+            # Determine the base output folder
+            if rdf_dir_path:
+                base_out_dir = rdf_dir_path
+            else:
+                base_out_dir = os.path.dirname(args.rdf_file) or "."
+            # Prepare list: [('main', None), (branch, branch), ...]
+            targets = [("main", None)] + [(b, b) for b in branches]
+            base_rdf_name = os.path.basename(args.rdf_file)
+
+            for folder_name, branch_name in targets:
+                out_dir = os.path.join(base_out_dir, folder_name)
+                # Aggregate output path goes inside this folder
+                agg_path = os.path.join(out_dir, base_rdf_name)
+                # Per-entity outputs go into this folder only if -D was given
+                per_entity_dir = out_dir if args.rdf_directory else False
+                # Private per-folder RDF if requested
+                private_path = os.path.join(out_dir, os.path.basename(audio_filename_rdf)) if audio_filename_rdf else False
+                write_rdf(parsed, agg_path, per_entity_dir, media_root_paths, private_path, branch=branch_name)
+        else:
+            # No branches provided -> behave as before (no extra folders)
+            write_rdf(parsed, args.rdf_file, rdf_dir_path, media_root_paths, audio_filename_rdf)
     if not args.quiet: 
         pprint(parsed)
