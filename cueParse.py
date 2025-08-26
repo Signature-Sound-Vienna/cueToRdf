@@ -28,9 +28,10 @@ EV = Namespace("https://purl.org/NET/c4dm/event.owl#")
 #MusicBrainz namespaces
 ARTIST = Namespace("https://musicbrainz.org/artist/")
 WORK = Namespace("https://musicbrainz.org/work/")
-RELEASE = Namespace("https://musicbrainz.org/work/")
+RELEASE = Namespace("https://musicbrainz.org/release/")
 ISRC = Namespace("https://musicbrainz.org/isrc/")
 RECORDING = Namespace("https://musicbrainz.org/recording/")
+LABEL = Namespace("https://musicbrainz.org/label/")
 TRACK = Namespace("https://musicbrainz.org/track/")
 # Base SSV namespaces (unbranched defaults)
 SSVRelease = Namespace("https://w3id.org/ssv/data/release/")
@@ -140,6 +141,7 @@ def bind_pretty_prefixes(graph: Graph, branch: Optional[str]) -> None:
     graph.namespace_manager.bind('mbisrc', str(ISRC), override=False)
     graph.namespace_manager.bind('mbrec', str(RECORDING), override=False)
     graph.namespace_manager.bind('mbtrack', str(TRACK), override=False)
+    graph.namespace_manager.bind('mblabel', str(LABEL), override=False)
 
 
  
@@ -181,6 +183,18 @@ def normalize_path(path):
     path = os.path.normpath(path)
     path = path.replace("\\", "/")
     return path.rstrip("/")
+
+def extract_year(date_str: Optional[str]) -> Optional[str]:
+    if not date_str or not isinstance(date_str, str):
+        return None
+    # Look for a plausible 4-digit year not equal to 0000
+    m = re.search(r"\b(\d{4})\b", date_str)
+    if not m:
+        return None
+    yr = m.group(1)
+    if yr == '0000':
+        return None
+    return yr
 
 def parse_cue_file(file_path, debug):
     try:
@@ -322,25 +336,42 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
         release_event = URIRef(SSVReleaseEvent + str(ssvUriComponent))
         record = URIRef(SSVRecord + str(ssvUriComponent))
         mbz_album_json = None
+        ws_release_json = None
+        release_recordings_map = None  # map track number string -> recording MBID
         if 'mbz_album_id' in p['header']:
             time.sleep(0.3)
             try:
-                r = requests.get("https://musicbrainz.org/album/" + p['header']['mbz_album_id'], headers={"Accept": "application/ld+json"})
+                # JSON-LD for the release page (for quick work links when present)
+                r = requests.get("https://musicbrainz.org/release/" + p['header']['mbz_album_id'], headers={"Accept": "application/ld+json"})
                 r.raise_for_status()
-                logging.info("MusicBrainz response for album id %s: %s", p['header']['mbz_album_id'], r.text)
+                logging.info("MusicBrainz JSON-LD for release %s fetched", p['header']['mbz_album_id'])
                 mbz_album_json = r.json()
             except requests.exceptions.HTTPError as err:
-                logging.warning("Could not GET Musicbrainz album %s: %s", p['header']['mbz_album_id'], err)
+                logging.warning("Could not GET MusicBrainz release JSON-LD %s: %s", p['header']['mbz_album_id'], err)
             except Exception as e:
-                logging.error(f"Error fetching MusicBrainz album {p['header']['mbz_album_id']}: {e}", exc_info=True)
+                logging.error(f"Error fetching MB release JSON-LD {p['header']['mbz_album_id']}: {e}", exc_info=True)
+            # Also fetch WS/2 release JSON for labels, dates, recordings map
+            try:
+                time.sleep(0.3)
+                url = f"https://musicbrainz.org/ws/2/release/{p['header']['mbz_album_id']}?inc=recordings+labels+release-events&fmt=json"
+                rr = requests.get(url, headers={"User-Agent": "ssv-cueToRdf/1.0 (contact@ssv.example)"})
+                rr.raise_for_status()
+                ws_release_json = rr.json()
+            except Exception as e:
+                logging.warning("WS/2 release fetch failed for labels/dates/recordings: %s", e)
 
         # RELEASE
         releaseGraph = Graph()
         releaseGraph.add((release, RDF.type, MO.Release))
         releaseGraph.add((release, DCTERMS.title, Literal(p['header'].get('title', '__NONE__'))))
         releaseGraph.add((release, RDFS.label, Literal("Release: " + p['header'].get('title', '__NONE__'))))
-        releaseGraph.add((release, MO.catalogue_number, Literal(p['header'].get('catalogue_number', '__NONE__'))))
+        # Catalogue number comes from CATALOG line -> 'catalog'
+        catno = p['header'].get('catalog') or p['header'].get('cddbcat') or '__NONE__'
+        releaseGraph.add((release, MO.catalogue_number, Literal(catno)))
         releaseGraph.add((release, MO.record, record))
+        # Link release to MusicBrainz release URI if we have it
+        if 'mbz_album_id' in p['header']:
+            releaseGraph.add((release, MO.musicbrainz, URIRef(RELEASE + p['header']['mbz_album_id'])))
         g += releaseGraph
         locals_dict["release"].append((releaseGraph, ssvUriComponent))
 
@@ -352,9 +383,45 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
         release_event_time = BNode()
         releaseEventGraph.add((release_event, EV.time, release_event_time))
         releaseEventGraph.add((release_event_time, RDF.type, TL.Instant))
-        releaseEventGraph.add((release_event_time, TL.atYear, Literal(p['header'].get('date', '__NONE__'), datatype=XSD.gYear)))
+        # Add dates: prefer earliest release-event from WS/2, fallback to header
+        issued_date = None
+        if ws_release_json:
+            dates = [e.get('date') for e in ws_release_json.get('release-events', []) if e.get('date')]
+            if dates:
+                try:
+                    issued_date = sorted(dates)[0]
+                except Exception:
+                    issued_date = dates[0]
+        if not issued_date:
+            issued_date = p['header'].get('date')
+        # Attach dcterms:issued on the release (full string; xsd:date if yyyy-mm-dd)
+        if issued_date:
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", issued_date):
+                releaseEventGraph.add((release, DCTERMS.issued, Literal(issued_date, datatype=XSD.date)))
+            else:
+                releaseEventGraph.add((release, DCTERMS.issued, Literal(issued_date)))
+        # Add timeline year when we have a clean 4-digit year
+        year = extract_year(issued_date)
+        if year:
+            releaseEventGraph.add((release_event_time, TL.atYear, Literal(year, datatype=XSD.gYear)))
         g += releaseEventGraph
         locals_dict["release_event"].append((releaseEventGraph, ssvUriComponent))
+
+        # Labels/publishers from WS/2
+        if ws_release_json:
+            for li in ws_release_json.get('label-info', []) or []:
+                lb = li.get('label') or {}
+                lb_id = lb.get('id')
+                lb_name = lb.get('name')
+                catno2 = li.get('catalog-number')
+                if lb_id:
+                    lb_uri = URIRef(LABEL + lb_id)
+                    g.add((lb_uri, RDF.type, FOAF.Organization))
+                    if lb_name:
+                        g.add((lb_uri, FOAF.name, Literal(lb_name)))
+                    releaseGraph.add((release, DCTERMS.publisher, lb_uri))
+                if catno2:
+                    releaseGraph.add((release, MO.catalogue_number, Literal(catno2)))
 
         # RECORD, TRACK, SIGNAL
         recordGraph = Graph()
@@ -363,8 +430,8 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
         recordGraph.add((record, RDF.type, MO.Record))
         releaseGraph.add((release, RDFS.label, Literal("Record: " + p['header'].get('title', '__NONE__'))))
         recordGraph.add((record, MO.track_count, Literal(len(p)-1)))
-        if 'musicbrainz_album_id' in p['header']:
-            recordGraph.add((record, MO.musicbrainz, RELEASE.p['header']['musicbrainz_album_id']))
+        if 'mbz_album_id' in p['header']:
+            recordGraph.add((record, MO.musicbrainz, URIRef(RELEASE + p['header']['mbz_album_id'])))
 
         for track_num in p:
             if track_num == 'header' or track_num == 'file_path':
@@ -417,43 +484,85 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
             if audioUri:
                 trackGraph.add((track, MO.available_as,audioUri))
 
-            # WORK via MBZ
+            # WORK via MBZ (JSON-LD first, WS/2 fallback)
             work = None
             if mbz_album_json:
                 mbz_tracks_json = mbz_album_json.get('track', [])
-                try: 
-                    # mbz has track numbers like 1.13 (13th track on disc 1)
-                    # filter out just the track num itself and compare it to our p track_num
-                    mbz_track_json = [t for t in mbz_tracks_json if t['trackNumber'][t['trackNumber'].index(".")+1:] == str(track_num)]
+                try:
+                    # Track numbers like 1.13 -> compare after the dot
+                    mbz_track_json = [t for t in mbz_tracks_json if t.get('trackNumber', '').split('.')[-1] == str(track_num)]
                 except Exception as e:
                     logging.error("Unexpected trackNumber format: %s", e, exc_info=True)
-                    continue
-                #if we have more than one match (e.g., because multiple discs) try to disambiguate with title similarity
+                    mbz_track_json = []
                 if len(mbz_track_json) > 1:
-                    similarities = [fuzz.ratio(t['name'], p[track_num]['title']) for t in mbz_track_json]
+                    similarities = [fuzz.ratio(t.get('name',''), p[track_num]['title']) for t in mbz_track_json]
                     close_match_indices = [ix for ix, val in enumerate(similarities) if val > 90]
                     mbz_track_json = [mbz_track_json[i] for i in close_match_indices]
-                # if we still have more than one match, warn the user (and default to first close-similarity match)
-                if len(mbz_track_json) > 1:
-                    logging.warning("Multiple matches on track disambiguation, please sort manually: %s ##### %s", mbz_track_json, p[track_num])
-                if len(mbz_track_json) == 0:
-                    logging.warning("Can't find unique matching cue track name %s", p[track_num]["title"]) 
-                else:
-                    if 'recordingOf' in mbz_track_json[0]:
-                        rec = mbz_track_json[0]['recordingOf']
-                        if isinstance(rec, list):
-                            # associated with multiple works - suspicious...
-                            logging.warning("Track associated with multiple works: %s", mbz_track_json[0].get("@id", ""))
-                        else:
-                            rec = [rec]
-                        for r in rec:
-                            work = URIRef(r['@id'])
-                            # add these straight to the full graph, we don't need to republish mbz individually
+                if len(mbz_track_json) == 1 and 'recordingOf' in mbz_track_json[0]:
+                    rec = mbz_track_json[0]['recordingOf']
+                    rec_list = rec if isinstance(rec, list) else [rec]
+                    # take the first work by default
+                    for r in rec_list:
+                        try:
+                            w_id = r['@id']
+                            w_name = r.get('name', '')
+                            work = URIRef(w_id)
                             g.add((work, RDF.type, MO.MusicalWork))
-                            g.add((work, DCTERMS.title, Literal(r['name'])))
-                            g.add((work, RDFS.label, Literal("Work: " + r['name'])))
-                    else:
-                        logging.warning("No work associated with MBz track: %s", mbz_track_json[0].get("@id", ""))
+                            if w_name:
+                                g.add((work, DCTERMS.title, Literal(w_name)))
+                                g.add((work, RDFS.label, Literal("Work: " + w_name)))
+                            break
+                        except Exception as e:
+                            logging.warning("Malformed recordingOf entry: %s", e)
+                else:
+                    logging.info("No recordingOf in JSON-LD for track %s; will try WS/2 fallback if possible", track_num)
+
+            # WS/2 fallback to resolve works via recording relations
+            if work is None and 'mbz_album_id' in p['header']:
+                # Build track->recording map once per release
+                if release_recordings_map is None:
+                    try:
+                        data = ws_release_json
+                        if not data:
+                            time.sleep(0.3)
+                            url = f"https://musicbrainz.org/ws/2/release/{p['header']['mbz_album_id']}?inc=recordings&fmt=json"
+                            rr = requests.get(url, headers={"User-Agent": "ssv-cueToRdf/1.0 (contact@ssv.example)"})
+                            rr.raise_for_status()
+                            data = rr.json()
+                        release_recordings_map = {}
+                        for medium in data.get('media', []) or []:
+                            for tr in medium.get('tracks', []) or []:
+                                num = str(tr.get('number', '')).split('.')[-1]
+                                rec = tr.get('recording', {}) or {}
+                                rec_id = rec.get('id')
+                                if num and rec_id:
+                                    release_recordings_map[num] = rec_id
+                    except Exception as e:
+                        logging.warning("WS/2 recordings fetch failed: %s", e)
+                        release_recordings_map = {}
+                rec_id = release_recordings_map.get(str(track_num)) if release_recordings_map else None
+                if rec_id:
+                    try:
+                        time.sleep(0.3)
+                        url = f"https://musicbrainz.org/ws/2/recording/{rec_id}?inc=work-rels&fmt=json"
+                        rrec = requests.get(url, headers={"User-Agent": "ssv-cueToRdf/1.0 (contact@ssv.example)"})
+                        rrec.raise_for_status()
+                        rj = rrec.json()
+                        for rel in rj.get('relations', []):
+                            if 'work' in rel:
+                                w = rel['work']
+                                w_id = w.get('id')
+                                w_title = w.get('title')
+                                if w_id:
+                                    w_uri = URIRef("https://musicbrainz.org/work/" + w_id)
+                                    g.add((w_uri, RDF.type, MO.MusicalWork))
+                                    if w_title:
+                                        g.add((w_uri, DCTERMS.title, Literal(w_title)))
+                                        g.add((w_uri, RDFS.label, Literal("Work: " + w_title)))
+                                    work = w_uri
+                                    break
+                    except Exception as e:
+                        logging.warning("WS/2 recording work-rels fetch failed for %s: %s", rec_id, e)
 
             # PERFORMANCE
             performanceGraph = Graph()
@@ -660,7 +769,6 @@ if __name__ == '__main__':
                             bind_pretty_prefixes(remapped, branch)
                             serializeRdf(remapped, os.path.join(subdir_path, key))
                 # Copy peaks files from main into each branch folder
-                # We only need to replicate files on disk; URIs in RDF are remapped via graph.
                 peaks_src = os.path.join(out_dir_main, 'peaks')
                 peaks_dst = os.path.join(out_dir, 'peaks')
                 if os.path.exists(peaks_src):
