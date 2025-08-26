@@ -477,7 +477,7 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
         trackGraph = Graph()
         signalGraph = Graph()
         recordGraph.add((record, RDF.type, MO.Record))
-        releaseGraph.add((release, RDFS.label, Literal("Record: " + p['header'].get('title', '__NONE__'))))
+        recordGraph.add((record, RDFS.label, Literal("Record: " + p['header'].get('title', '__NONE__'))))
         recordGraph.add((record, MO.track_count, Literal(len(p)-1)))
         if mbid_clean:
             recordGraph.add((record, MO.musicbrainz, URIRef(RELEASE + mbid_clean)))
