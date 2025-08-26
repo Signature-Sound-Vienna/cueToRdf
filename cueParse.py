@@ -421,15 +421,19 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
             work = None
             if mbz_album_json:
                 mbz_tracks_json = mbz_album_json.get('track', [])
-                try:
+                try: 
+                    # mbz has track numbers like 1.13 (13th track on disc 1)
+                    # filter out just the track num itself and compare it to our p track_num
                     mbz_track_json = [t for t in mbz_tracks_json if t['trackNumber'][t['trackNumber'].index(".")+1:] == str(track_num)]
                 except Exception as e:
                     logging.error("Unexpected trackNumber format: %s", e, exc_info=True)
                     continue
+                #if we have more than one match (e.g., because multiple discs) try to disambiguate with title similarity
                 if len(mbz_track_json) > 1:
                     similarities = [fuzz.ratio(t['name'], p[track_num]['title']) for t in mbz_track_json]
                     close_match_indices = [ix for ix, val in enumerate(similarities) if val > 90]
                     mbz_track_json = [mbz_track_json[i] for i in close_match_indices]
+                # if we still have more than one match, warn the user (and default to first close-similarity match)
                 if len(mbz_track_json) > 1:
                     logging.warning("Multiple matches on track disambiguation, please sort manually: %s ##### %s", mbz_track_json, p[track_num])
                 if len(mbz_track_json) == 0:
@@ -438,11 +442,13 @@ def build_rdf_content(parsed, media_root_paths, peaks_root_dir: Optional[str]):
                     if 'recordingOf' in mbz_track_json[0]:
                         rec = mbz_track_json[0]['recordingOf']
                         if isinstance(rec, list):
+                            # associated with multiple works - suspicious...
                             logging.warning("Track associated with multiple works: %s", mbz_track_json[0].get("@id", ""))
                         else:
                             rec = [rec]
                         for r in rec:
                             work = URIRef(r['@id'])
+                            # add these straight to the full graph, we don't need to republish mbz individually
                             g.add((work, RDF.type, MO.MusicalWork))
                             g.add((work, DCTERMS.title, Literal(r['name'])))
                             g.add((work, RDFS.label, Literal("Work: " + r['name'])))
